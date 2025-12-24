@@ -1,0 +1,2 @@
+# python_packaging_tool
+一个功能强大的图形化Python打包工具，支持PyInstaller和Nuitka双引擎
