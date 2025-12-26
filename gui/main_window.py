@@ -1,0 +1,1478 @@
+"""
+Python打包工具 - 主窗口
+PyQt6最佳实践实现
+
+本模块实现主应用程序窗口，遵循PyQt6最佳实践：
+1. 关注点分离（UI、逻辑、样式）
+2. 使用QThreadPool处理后台任务
+3. 全面使用类型提示
+4. 集中式主题管理
+5. 模块化组件组织
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import webbrowser
+from typing import Any, Dict, Optional
+
+from PyQt6.QtCore import (
+    Q_ARG,
+    QMetaObject,
+    Qt,
+    QThreadPool,
+    pyqtSignal,
+    pyqtSlot,
+)
+from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QPushButton,
+    QRadioButton,
+    QTextEdit,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+# 导入核心模块
+from core.dependency_analyzer import DependencyAnalyzer
+from core.packager import Packager
+
+# 导入重构后的GUI模块
+from gui.controllers.workers import PackagingWorker
+from gui.styles.themes import (
+    ThemeManager,
+    ThemeMode,
+)
+from gui.widgets.icons import IconGenerator
+from utils.dependency_manager import DependencyManager
+from utils.gcc_downloader import GCCDownloader, validate_mingw_directory
+
+
+class MainWindow(QMainWindow):
+    """
+    主应用程序窗口 - PyQt6最佳实践实现
+
+    主要改进：
+    - 使用QThreadPool处理后台任务
+    - 通过ThemeManager进行集中式主题管理
+    - 通过IconGenerator分离图标生成
+    - 清晰的信号/槽模式用于线程通信
+    - 全面使用类型提示
+    """
+
+    # 用于线程安全通信的应用程序信号
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(bool, str)
+    update_exclude_modules_signal = pyqtSignal(str)
+    update_download_progress_signal = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.resize(900, 700)
+
+        # 初始化核心组件
+        self._init_directories()
+        self._init_managers()
+        self._init_state()
+        self._init_ui()
+        self._connect_signals()
+        self._load_settings()
+        self._apply_initial_theme()
+
+    def _init_directories(self) -> None:
+        """初始化应用程序目录"""
+        self.app_dir = self._get_app_dir()
+
+        # Config directory - 始终使用用户目录，确保配置持久化（尤其是打包后的exe）
+        # 这样GCC配置等可以在重启后保留
+        user_config_dir = os.path.join(os.path.expanduser("~"), ".python_packaging_tool")
+        try:
+            os.makedirs(user_config_dir, exist_ok=True)
+            config_dir = user_config_dir
+        except Exception:
+            # 回退到应用目录
+            config_dir = os.path.join(self.app_dir, "config")
+            try:
+                os.makedirs(config_dir, exist_ok=True)
+            except Exception:
+                pass
+
+        self.config_dir = config_dir
+        self.gcc_config_file = os.path.join(config_dir, "gcc_config.json")
+        self.theme_config_file = os.path.join(config_dir, "theme_config.json")
+
+    def _init_managers(self) -> None:
+        """初始化管理器对象"""
+        # 主题和图标管理
+        self.icon_generator = IconGenerator(self.app_dir)
+        self.theme_manager = ThemeManager(self.app_dir)
+
+        # 生成主题图标
+        self.icon_generator.generate_theme_icons()
+
+        # 依赖管理
+        self.dependency_manager = DependencyManager()
+
+        # 用于后台任务的线程池
+        self.thread_pool = QThreadPool.globalInstance()
+
+    def _init_state(self) -> None:
+        """初始化应用程序状态"""
+        # GCC配置状态
+        self.gcc_config_loaded = False
+        self.gcc_config_loading = False
+
+        # 下载状态
+        self.is_downloading = False
+        self.cancel_download = False
+        self.download_thread: Optional[threading.Thread] = None
+
+        # 打包状态
+        self.is_packaging = False
+        self.cancel_packaging = False
+        self.packaging_process: Optional[subprocess.Popen] = None
+        self._current_packaging_worker: Optional[PackagingWorker] = None
+
+        # 跟踪之前的项目目录以进行变更检测
+        self._previous_project_dir: Optional[str] = None
+
+    def _connect_signals(self) -> None:
+        """连接应用程序信号到槽"""
+        self.log_signal.connect(self._on_log_message)
+        self.finished_signal.connect(self._on_task_finished)
+        self.update_exclude_modules_signal.connect(self._on_exclude_modules_update)
+        self.update_download_progress_signal.connect(self._on_download_progress_update)
+
+        # 主题改变信号
+        self.theme_manager.theme_changed.connect(self._on_theme_changed)
+
+    def _load_settings(self) -> None:
+        """加载保存的设置"""
+        self._load_theme_setting()
+
+    def _apply_initial_theme(self) -> None:
+        """应用初始主题"""
+        self.apply_theme()
+        self._update_theme_button_state()
+
+    # =========================================================================
+    # Directory and Resource Management
+    # =========================================================================
+
+    def _get_app_dir(self) -> str:
+        """
+        获取应用程序目录（兼容打包后的exe）。
+
+        对于打包后的exe，使用临时目录以避免污染exe目录。
+        """
+        if getattr(sys, 'frozen', False):
+            app_temp_dir = os.path.join(tempfile.gettempdir(), 'python_packaging_tool')
+            try:
+                os.makedirs(app_temp_dir, exist_ok=True)
+                return app_temp_dir
+            except Exception:
+                return os.path.dirname(sys.executable)
+        else:
+            return os.path.dirname(os.path.dirname(__file__))
+
+    def _get_resource_path(self, relative_path: str) -> Optional[str]:
+        """获取资源文件路径（兼容打包后的exe）"""
+        if getattr(sys, 'frozen', False):
+            possible_paths = []
+
+            # PyInstaller单文件模式使用_MEIPASS
+            meipass = getattr(sys, '_MEIPASS', None)
+            if meipass:
+                possible_paths.append(os.path.join(meipass, relative_path))
+                # Nuitka打包后，数据文件可能在exe目录下
+                # 对于icon.ico，Nuitka会将其包含为icon.ico（通过--include-data-file）
+                if relative_path.endswith("icon.ico"):
+                    possible_paths.append(os.path.join(meipass, "icon.ico"))
+
+            possible_paths.extend([
+                os.path.join(os.path.dirname(sys.executable), relative_path),
+                # Nuitka打包后，icon.ico直接在exe目录下
+                os.path.join(os.path.dirname(sys.executable), "icon.ico") if relative_path.endswith("icon.ico") else None,
+                os.path.join(os.getcwd(), relative_path),
+                os.path.join(os.getcwd(), "icon.ico") if relative_path.endswith("icon.ico") else None,
+                relative_path,
+            ])
+
+            # 过滤None值
+            possible_paths = [p for p in possible_paths if p is not None]
+
+            for path in possible_paths:
+                if os.path.exists(path):
+                    return path
+
+            # 如果找不到文件，对于图标文件，尝试从exe资源中提取
+            if relative_path.endswith("icon.ico") and sys.platform == 'win32':
+                # 返回exe路径，Qt会自动从exe资源中提取图标
+                return sys.executable
+
+            return None
+        else:
+            return os.path.join(os.path.dirname(os.path.dirname(__file__)), relative_path)
+
+    # =========================================================================
+    # UI Initialization
+    # =========================================================================
+
+    def _init_ui(self) -> None:
+        """初始化用户界面"""
+        central_widget = QWidget()
+        central_widget.setObjectName("centralWidget")
+        self.setCentralWidget(central_widget)
+
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Build UI sections
+        self._create_file_selection_group(main_layout)
+        self._create_tool_selection_group(main_layout)
+        self._create_options_group(main_layout)
+        self._create_log_group(main_layout)
+        self._create_button_bar(main_layout)
+
+        # Set window icon
+        self._set_window_icon()
+
+        # Initial log message
+        self.append_log("准备就绪...")
+
+    def _create_file_selection_group(self, parent_layout: QVBoxLayout) -> None:
+        """创建文件选择组"""
+        file_group = QGroupBox("文件选择")
+        file_layout = QVBoxLayout(file_group)
+
+        # Project directory
+        project_layout = QHBoxLayout()
+        project_layout.addWidget(QLabel("项目目录:"))
+        self.project_dir_edit = QLineEdit()
+        self.project_dir_edit.setPlaceholderText("可选，选择Python项目根目录")
+        self.project_dir_edit.textChanged.connect(self.on_project_dir_changed)
+        project_layout.addWidget(self.project_dir_edit)
+        project_btn = QPushButton("浏览")
+        project_btn.clicked.connect(self.browse_project_dir)
+        project_layout.addWidget(project_btn)
+        file_layout.addLayout(project_layout)
+
+        # 运行脚本
+        script_layout = QHBoxLayout()
+        script_layout.addWidget(QLabel("运行脚本:"))
+        self.script_path_edit = QLineEdit()
+        self.script_path_edit.setPlaceholderText("必选，指定要执行的Python脚本")
+        self.script_path_edit.textChanged.connect(self.on_script_path_changed)
+        script_layout.addWidget(self.script_path_edit)
+        script_btn = QPushButton("浏览")
+        script_btn.clicked.connect(self.browse_script)
+        script_layout.addWidget(script_btn)
+        file_layout.addLayout(script_layout)
+
+        # 输出目录
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(QLabel("输出目录:"))
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("可选，默认为项目目录下的build文件夹")
+        output_layout.addWidget(self.output_dir_edit)
+        output_btn = QPushButton("浏览")
+        output_btn.clicked.connect(self.browse_output_dir)
+        output_layout.addWidget(output_btn)
+        file_layout.addLayout(output_layout)
+
+        # 图标路径
+        icon_layout = QHBoxLayout()
+        icon_layout.addWidget(QLabel("程序图标:"))
+        self.icon_path_edit = QLineEdit()
+        self.icon_path_edit.setPlaceholderText("可选，支持 .ico/.png/.svg 等格式，自动转换为多尺寸图标")
+        icon_layout.addWidget(self.icon_path_edit)
+        icon_btn = QPushButton("浏览")
+        icon_btn.clicked.connect(self.browse_icon)
+        icon_layout.addWidget(icon_btn)
+        file_layout.addLayout(icon_layout)
+
+        # 程序名称
+        name_layout = QHBoxLayout()
+        name_layout.addWidget(QLabel("程序名称:"))
+        self.program_name_edit = QLineEdit()
+        self.program_name_edit.setPlaceholderText("可选，指定打包后的exe文件名（不含.exe扩展名）")
+        name_layout.addWidget(self.program_name_edit)
+        file_layout.addLayout(name_layout)
+
+        # Python路径
+        python_layout = QHBoxLayout()
+        python_layout.addWidget(QLabel("Python路径:"))
+        self.python_path_edit = QLineEdit()
+        self.python_path_edit.setPlaceholderText("可选，留空将自动检测系统Python")
+        python_layout.addWidget(self.python_path_edit)
+        python_btn = QPushButton("浏览")
+        python_btn.clicked.connect(self.browse_python)
+        python_layout.addWidget(python_btn)
+        file_layout.addLayout(python_layout)
+
+        parent_layout.addWidget(file_group)
+
+    def _create_tool_selection_group(self, parent_layout: QVBoxLayout) -> None:
+        """创建工具选择组"""
+        tool_group = QGroupBox("打包工具")
+        tool_layout = QVBoxLayout(tool_group)
+
+        tool_radio_layout = QHBoxLayout()
+        self.pyinstaller_radio = QRadioButton("PyInstaller")
+        self.pyinstaller_radio.setChecked(True)
+        self.pyinstaller_radio.toggled.connect(self.on_tool_changed)
+        self.nuitka_radio = QRadioButton("Nuitka")
+        self.nuitka_radio.toggled.connect(self.on_tool_changed)
+
+        tool_radio_layout.addWidget(self.pyinstaller_radio)
+        tool_radio_layout.addWidget(self.nuitka_radio)
+        tool_radio_layout.addStretch()
+        tool_layout.addLayout(tool_radio_layout)
+
+        # GCC path widget (Nuitka only)
+        self.gcc_widget = QWidget()
+        gcc_widget_layout = QVBoxLayout(self.gcc_widget)
+        gcc_widget_layout.setContentsMargins(0, 0, 0, 0)
+        gcc_widget_layout.setSpacing(5)
+
+        gcc_layout = QHBoxLayout()
+        gcc_layout.addWidget(QLabel("GCC编译链:"))
+        self.gcc_path_edit = QLineEdit()
+        self.gcc_path_edit.setPlaceholderText("必选，指定GCC工具链目录，一般为mingw64或mingw32目录")
+        self.gcc_path_edit.textChanged.connect(self.on_gcc_path_changed)
+        gcc_layout.addWidget(self.gcc_path_edit)
+        self.gcc_browse_btn = QPushButton("浏览")
+        self.gcc_browse_btn.clicked.connect(self.browse_gcc)
+        gcc_layout.addWidget(self.gcc_browse_btn)
+        self.gcc_download_btn = QPushButton("自动下载")
+        self.gcc_download_btn.clicked.connect(self.download_gcc)
+        gcc_layout.addWidget(self.gcc_download_btn)
+        gcc_widget_layout.addLayout(gcc_layout)
+
+        # GCC download progress label
+        self.gcc_download_label = QLabel("")
+        gcc_widget_layout.addWidget(self.gcc_download_label)
+
+        tool_layout.addWidget(self.gcc_widget)
+        self.gcc_widget.setVisible(False)
+
+        parent_layout.addWidget(tool_group)
+
+    def _create_options_group(self, parent_layout: QVBoxLayout) -> None:
+        """Create packaging options group"""
+        options_group = QGroupBox("打包选项")
+        options_layout = QVBoxLayout(options_group)
+
+        # 复选框行
+        checkboxes_layout = QHBoxLayout()
+
+        self.onefile_check = QCheckBox("单文件模式")
+        self.onefile_check.setChecked(True)
+        self.onefile_check.setToolTip("打包成单个exe文件")
+
+        self.clean_check = QCheckBox("清理构建缓存")
+        self.clean_check.setChecked(True)
+        self.clean_check.setToolTip("打包前清理临时文件")
+
+        self.venv_check = QCheckBox("使用虚拟环境")
+        self.venv_check.setChecked(True)
+        self.venv_check.setToolTip("在虚拟环境中打包以隔离依赖")
+
+        self.upx_check = QCheckBox("使用UPX压缩")
+        self.upx_check.setChecked(True)
+        self.upx_check.setToolTip("压缩exe体积（需安装UPX）")
+
+        self.lto_check = QCheckBox("启用LTO链接优化")
+        self.lto_check.setChecked(True)
+        self.lto_check.setToolTip("启用链接时优化，减小体积并提升性能（仅Nuitka）")
+        self.lto_check.setVisible(False)
+
+        self.python_opt_check = QCheckBox("启用Python优化")
+        self.python_opt_check.setChecked(True)
+        self.python_opt_check.setToolTip("启用Python字节码优化（-O参数）")
+
+        self.console_check = QCheckBox("显示控制台窗口")
+        self.console_check.setChecked(False)
+        self.console_check.setToolTip("运行时是否显示CMD窗口")
+
+        checkboxes_layout.addWidget(self.onefile_check)
+        checkboxes_layout.addWidget(self.clean_check)
+        checkboxes_layout.addWidget(self.venv_check)
+        checkboxes_layout.addWidget(self.upx_check)
+        checkboxes_layout.addWidget(self.lto_check)
+        checkboxes_layout.addWidget(self.python_opt_check)
+        checkboxes_layout.addWidget(self.console_check)
+        checkboxes_layout.addStretch()
+
+        options_layout.addLayout(checkboxes_layout)
+
+        # Exclude modules row
+        exclude_layout = QHBoxLayout()
+        exclude_layout.addWidget(QLabel("排除模块:"))
+        self.exclude_modules_edit = QLineEdit()
+        self.exclude_modules_edit.setPlaceholderText(
+            "可选，默认会自动排除，你也可以手动追加需要排除的模块，多个模块用逗号分隔，如：wx,wxPython,ui"
+        )
+        exclude_layout.addWidget(self.exclude_modules_edit)
+
+        self.analyze_btn = QPushButton("分析依赖")
+        self.analyze_btn.setMinimumHeight(35)
+        self.analyze_btn.clicked.connect(self.analyze_dependencies)
+        exclude_layout.addWidget(self.analyze_btn)
+
+        options_layout.addLayout(exclude_layout)
+
+        parent_layout.addWidget(options_group)
+
+    def _create_log_group(self, parent_layout: QVBoxLayout) -> None:
+        """创建日志输出组"""
+        log_group = QGroupBox("日志输出")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Consolas", 9))
+        log_layout.addWidget(self.log_text)
+
+        parent_layout.addWidget(log_group)
+
+    def _create_button_bar(self, parent_layout: QVBoxLayout) -> None:
+        """Create bottom button bar"""
+        btn_layout = QHBoxLayout()
+
+        # Theme button with menu
+        self.theme_btn = QToolButton()
+        self.theme_btn.setText("🌓 主题")
+        self.theme_btn.setToolTip("切换主题模式")
+        self.theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.theme_btn.setMinimumHeight(40)
+
+        theme_menu = QMenu(self)
+        self.theme_system_action = theme_menu.addAction("🖥️ 跟随系统")
+        self.theme_system_action.setCheckable(True)
+        self.theme_system_action.setChecked(True)
+        self.theme_system_action.triggered.connect(lambda: self.set_theme(ThemeMode.SYSTEM))
+
+        self.theme_light_action = theme_menu.addAction("☀️ 浅色模式")
+        self.theme_light_action.setCheckable(True)
+        self.theme_light_action.triggered.connect(lambda: self.set_theme(ThemeMode.LIGHT))
+
+        self.theme_dark_action = theme_menu.addAction("🌙 深色模式")
+        self.theme_dark_action.setCheckable(True)
+        self.theme_dark_action.triggered.connect(lambda: self.set_theme(ThemeMode.DARK))
+
+        self.theme_btn.setMenu(theme_menu)
+        btn_layout.addWidget(self.theme_btn)
+
+        btn_layout.addStretch()
+
+        # Action buttons
+        self.package_btn = QPushButton("开始打包")
+        self.package_btn.setMinimumHeight(40)
+        self.package_btn.setMinimumWidth(120)
+        self.package_btn.clicked.connect(self.toggle_packaging)
+
+        self.clear_btn = QPushButton("清空日志")
+        self.clear_btn.setMinimumHeight(40)
+        self.clear_btn.setMinimumWidth(120)
+        self.clear_btn.clicked.connect(self.clear_log)
+
+        btn_layout.addWidget(self.package_btn)
+        btn_layout.addWidget(self.clear_btn)
+
+        parent_layout.addLayout(btn_layout)
+
+    def _set_window_icon(self) -> None:
+        """设置窗口图标"""
+        try:
+            # 尝试多种路径查找图标
+            icon_filename = "icon.ico"
+
+            if getattr(sys, 'frozen', False):
+                # 打包后的exe模式
+                exe_dir = os.path.dirname(sys.executable)
+                possible_paths = [
+                    os.path.join(exe_dir, icon_filename),
+                    os.path.join(exe_dir, "resources", "icons", icon_filename),
+                    os.path.join(os.getcwd(), icon_filename),
+                ]
+                # PyInstaller的_MEIPASS
+                meipass = getattr(sys, '_MEIPASS', None)
+                if meipass:
+                    possible_paths.insert(0, os.path.join(meipass, icon_filename))
+                    possible_paths.insert(1, os.path.join(meipass, "resources", "icons", icon_filename))
+
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        self.setWindowIcon(QIcon(path))
+                        return
+            else:
+                # 开发模式
+                icon_path = self._get_resource_path("resources/icons/icon.ico")
+                if icon_path and os.path.exists(icon_path):
+                    self.setWindowIcon(QIcon(icon_path))
+        except Exception as e:
+            print(f"加载图标失败: {e}")
+
+    # =========================================================================
+    # Theme Management
+    # =========================================================================
+
+    def set_theme(self, mode: ThemeMode) -> None:
+        """设置主题模式"""
+        self.theme_manager.current_mode = mode
+        self._update_theme_button_state()
+        self._save_theme_setting()
+        self.apply_theme()
+
+        mode_names = {
+            ThemeMode.SYSTEM: "跟随系统",
+            ThemeMode.LIGHT: "浅色",
+            ThemeMode.DARK: "深色",
+        }
+        self.append_log(f"已切换到{mode_names[mode]}主题")
+
+    def apply_theme(self) -> None:
+        """将当前主题应用到界面"""
+        app = QApplication.instance()
+        if not app:
+            return
+
+        is_dark = self.theme_manager.is_dark
+
+        # 根据主题获取图标路径（使用简化的文件名）
+        if is_dark:
+            check_icon = self.icon_generator.get_icon_path("check_dark.png")
+            radio_icon = self.icon_generator.get_icon_path("radio_dark.png")
+        else:
+            check_icon = self.icon_generator.get_icon_path("check_light.png")
+            radio_icon = self.icon_generator.get_icon_path("radio_light.png")
+
+        # 应用样式表
+        stylesheet = self.theme_manager.get_stylesheet(check_icon, radio_icon)
+        self.setStyleSheet(stylesheet)
+
+        # 更新GCC下载标签颜色
+        if hasattr(self, 'gcc_download_label'):
+            color = self.theme_manager.get_label_color("warning" if is_dark else "accent")
+            self.gcc_download_label.setStyleSheet(f"color: {color};")
+
+    def _update_theme_button_state(self) -> None:
+        """更新主题按钮状态以反映当前设置"""
+        mode = self.theme_manager.current_mode
+
+        self.theme_system_action.setChecked(mode == ThemeMode.SYSTEM)
+        self.theme_light_action.setChecked(mode == ThemeMode.LIGHT)
+        self.theme_dark_action.setChecked(mode == ThemeMode.DARK)
+
+        button_texts = {
+            ThemeMode.SYSTEM: "🌓 主题",
+            ThemeMode.LIGHT: "☀️ 浅色",
+            ThemeMode.DARK: "🌙 深色",
+        }
+        self.theme_btn.setText(button_texts[mode])
+
+    def _load_theme_setting(self) -> None:
+        """从配置文件加载主题设置"""
+        try:
+            if os.path.exists(self.theme_config_file):
+                with open(self.theme_config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    mode_str = config.get('theme_mode', 'system')
+                    mode_map = {
+                        'system': ThemeMode.SYSTEM,
+                        'light': ThemeMode.LIGHT,
+                        'dark': ThemeMode.DARK,
+                    }
+                    self.theme_manager.current_mode = mode_map.get(mode_str, ThemeMode.SYSTEM)
+        except Exception as e:
+            print(f"加载主题设置失败: {e}")
+
+    def _save_theme_setting(self) -> None:
+        """保存主题设置到配置文件"""
+        try:
+            config = {'theme_mode': self.theme_manager.current_mode.value}
+            with open(self.theme_config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存主题设置失败: {e}")
+
+    @pyqtSlot(bool)
+    def _on_theme_changed(self, is_dark: bool) -> None:
+        """处理主题改变信号"""
+        self.apply_theme()
+
+    # =========================================================================
+    # 信号槽
+    # =========================================================================
+
+    @pyqtSlot(str)
+    def _on_log_message(self, message: str) -> None:
+        """处理日志消息信号"""
+        self.append_log(message)
+
+    @pyqtSlot(bool, str)
+    def _on_task_finished(self, success: bool, message: str) -> None:
+        """处理任务完成信号"""
+        self.on_packaging_finished(success, message)
+
+    @pyqtSlot(str)
+    def _on_exclude_modules_update(self, modules: str) -> None:
+        """处理排除模块更新信号"""
+        self.update_exclude_modules_ui(modules)
+
+    @pyqtSlot(str)
+    def _on_download_progress_update(self, progress: str) -> None:
+        """处理下载进度更新信号"""
+        self.update_download_progress_ui(progress)
+
+    # =========================================================================
+    # 文件浏览方法
+    # =========================================================================
+
+    def browse_project_dir(self) -> None:
+        """浏览项目目录"""
+        path = QFileDialog.getExistingDirectory(self, "选择项目目录")
+        if path:
+            self.project_dir_edit.setText(path)
+
+    def browse_script(self) -> None:
+        """浏览脚本文件"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择运行脚本", "", "Python Files (*.py);;All Files (*)"
+        )
+        if path:
+            self.script_path_edit.setText(path)
+
+    def browse_output_dir(self) -> None:
+        """浏览输出目录"""
+        path = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        if path:
+            self.output_dir_edit.setText(path)
+
+    def browse_icon(self) -> None:
+        """浏览图标文件"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择程序图标", "",
+            "Icon Files (*.ico *.png *.svg *.jpg *.jpeg *.bmp);;All Files (*)"
+        )
+        if path:
+            self.icon_path_edit.setText(path)
+
+    def browse_python(self) -> None:
+        """浏览Python可执行文件"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择Python解释器", "", "Executable (*.exe);;All Files (*)"
+        )
+        if path:
+            self.python_path_edit.setText(path)
+
+    def browse_gcc(self) -> None:
+        """浏览GCC工具链（mingw64或mingw32目录）"""
+        # 选择目录而不是文件
+        path = QFileDialog.getExistingDirectory(
+            self, "选择GCC工具链目录 (mingw64 或 mingw32)",
+            GCCDownloader.get_nuitka_cache_dir()
+        )
+        if path:
+            # 验证mingw目录
+            is_valid, msg = validate_mingw_directory(path)
+            if not is_valid:
+                QMessageBox.critical(
+                    self,
+                    "GCC工具链验证失败",
+                    f"所选目录不是有效的GCC工具链：\n\n{msg}\n\n"
+                    "请选择有效的 mingw64 或 mingw32 目录。\n"
+                    "该目录应包含 bin 子目录，且 bin 目录下应存在 gcc.exe、g++.exe 等文件。",
+                )
+                return
+            self.gcc_path_edit.setText(path)
+            self._show_info("验证通过", "GCC工具链目录验证通过！")
+
+    # =========================================================================
+    # 事件处理器
+    # =========================================================================
+
+    def on_project_dir_changed(self, text: str) -> None:
+        """Handle project directory change"""
+        project_dir = text.strip()
+        if not project_dir or not os.path.isdir(project_dir):
+            return
+
+        # Check if project directory actually changed
+        if project_dir == self._previous_project_dir:
+            return
+
+        # Update previous project directory
+        self._previous_project_dir = project_dir
+
+        # 检测并清空 build 目录（仅对项目目录操作，单独脚本不处理）
+        self._check_and_clean_build_dir(project_dir)
+
+        # Try to find main script - always update when project dir changes
+        possible_scripts = ['main.py', 'app.py', 'run.py', '__main__.py']
+        script_found = False
+        for script in possible_scripts:
+            script_path = os.path.join(project_dir, script)
+            if os.path.exists(script_path):
+                self.script_path_edit.setText(script_path)
+                script_found = True
+                break
+
+        # If no common script found, clear the field
+        if not script_found:
+            self.script_path_edit.clear()
+
+        # Set output directory - always update when project dir changes
+        self.output_dir_edit.setText(os.path.join(project_dir, "build"))
+
+        # Set program name from directory name - always update when project dir changes
+        dir_name = os.path.basename(project_dir)
+        if dir_name:
+            self.program_name_edit.setText(dir_name)
+
+        # Auto-load icon from project directory - always update when project dir changes
+        self._auto_load_project_icon(project_dir, force_update=True)
+
+    def _auto_load_project_icon(self, project_dir: str, force_update: bool = False) -> None:
+        """Auto-load ico icon from project directory
+
+        Priority:
+        1. icon.ico (if exists)
+        2. Any other .ico file found
+
+        Args:
+            project_dir: The project directory to search for icons
+            force_update: If True, always update even if icon path is already set
+        """
+        # Skip if icon path is already set and not forcing update
+        if not force_update and self.icon_path_edit.text().strip():
+            return
+
+        try:
+            ico_files = []
+            for item in os.listdir(project_dir):
+                if item.lower().endswith('.ico'):
+                    ico_files.append(item)
+
+            if not ico_files:
+                return
+
+            # Priority: icon.ico first
+            selected_icon = None
+            for ico in ico_files:
+                if ico.lower() == 'icon.ico':
+                    selected_icon = ico
+                    break
+
+            # If no icon.ico, use the first one found
+            if not selected_icon:
+                selected_icon = ico_files[0]
+
+            icon_path = os.path.join(project_dir, selected_icon)
+            self.icon_path_edit.setText(icon_path)
+            self.append_log(f"已自动加载程序图标: {selected_icon}")
+            return
+
+        except Exception as e:
+            print(f"自动加载图标失败: {e}")
+
+        # If no icon found and force_update, clear the field
+        if force_update:
+            self.icon_path_edit.clear()
+
+    def _check_and_clean_build_dir(self, project_dir: str) -> None:
+        """检测项目目录下的 build 目录，如果存在则询问用户是否清空"""
+        build_dir = os.path.join(project_dir, "build")
+
+        if not os.path.exists(build_dir) or not os.path.isdir(build_dir):
+            return
+
+        # 检查 build 目录是否有内容
+        try:
+            build_contents = os.listdir(build_dir)
+            if not build_contents:
+                return  # 空目录，无需清空
+        except Exception:
+            return
+
+        # 询问用户是否清空 build 目录
+        msg_box = self._create_message_box(
+            QMessageBox.Icon.Question,
+            "清空构建目录",
+            f"检测到项目目录下存在 build 目录，其中包含 {len(build_contents)} 个文件/文件夹。\n\n是否清空该目录以确保干净的构建环境？"
+        )
+        msg_box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        msg_box.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        result = msg_box.exec()
+
+        if result == QMessageBox.StandardButton.Yes:
+            try:
+                # 清空 build 目录内容，但保留目录本身
+                for item in build_contents:
+                    item_path = os.path.join(build_dir, item)
+                    if os.path.isfile(item_path):
+                        os.remove(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path)
+
+                self.append_log(f"已清空构建目录: {build_dir}")
+            except Exception as e:
+                self.append_log(f"清空构建目录失败: {str(e)}")
+                self._show_warning("警告", f"清空构建目录失败: {str(e)}")
+
+    def on_script_path_changed(self, text: str) -> None:
+        """处理脚本路径变更"""
+        script_path = text.strip()
+        if not script_path or not os.path.isfile(script_path):
+            return
+
+        script_dir = os.path.dirname(script_path)
+
+        # 如果未设置项目目录，则设置
+        if not self.project_dir_edit.text().strip():
+            self.project_dir_edit.setText(script_dir)
+
+        # 如果未设置输出目录，则设置
+        if not self.output_dir_edit.text().strip():
+            self.output_dir_edit.setText(os.path.join(script_dir, "build"))
+
+        # 从脚本名称设置程序名称
+        if not self.program_name_edit.text().strip() or self._is_auto_filled_name():
+            script_name = os.path.splitext(os.path.basename(script_path))[0]
+            if script_name and script_name not in ['main', 'app', 'run', '__main__']:
+                self.program_name_edit.setText(script_name)
+
+    def _is_auto_filled_name(self) -> bool:
+        """检查当前程序名称是否为自动填充"""
+        current_name = self.program_name_edit.text().strip()
+        if not current_name:
+                return True
+
+        # 检查名称是否匹配项目目录或脚本名称
+        project_dir = self.project_dir_edit.text().strip()
+        if project_dir:
+            dir_name = os.path.basename(project_dir)
+            if current_name == dir_name:
+                return True
+
+        script_path = self.script_path_edit.text().strip()
+        if script_path:
+            script_name = os.path.splitext(os.path.basename(script_path))[0]
+            if current_name == script_name:
+                return True
+
+        return False
+
+    def on_tool_changed(self, checked: bool) -> None:
+        """处理打包工具变更"""
+        is_nuitka = self.nuitka_radio.isChecked()
+
+        # Show/hide Nuitka-specific options
+        self.gcc_widget.setVisible(is_nuitka)
+        self.lto_check.setVisible(is_nuitka)
+
+        # Load GCC config for Nuitka
+        if is_nuitka and not self.gcc_config_loaded and not self.gcc_config_loading:
+            self.load_gcc_config()
+
+    def on_gcc_path_changed(self, text: str) -> None:
+        """Handle GCC path change"""
+        gcc_path = text.strip()
+        if gcc_path:
+            self.save_gcc_config()
+        # Update download button visibility when GCC path changes
+        self._update_gcc_download_button_visibility()
+
+    # =========================================================================
+    # Logging
+    # =========================================================================
+
+    def append_log(self, message: str) -> None:
+        """Append message to log output"""
+        self.log_text.append(message)
+        # Auto-scroll to bottom
+        scrollbar = self.log_text.verticalScrollBar()
+        if scrollbar:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def clear_log(self) -> None:
+        """Clear log output"""
+        self.log_text.clear()
+
+    # =========================================================================
+    # Configuration
+    # =========================================================================
+
+    def get_config(self) -> Dict[str, Any]:
+        """Get packaging configuration"""
+        project_dir = self.project_dir_edit.text().strip()
+        script_path = self.script_path_edit.text().strip()
+
+        if not project_dir and script_path:
+            project_dir = os.path.dirname(script_path)
+
+        exclude_modules_text = self.exclude_modules_edit.text().strip()
+        exclude_modules = []
+        if exclude_modules_text:
+            exclude_modules = [m.strip() for m in exclude_modules_text.split(',') if m.strip()]
+
+        return {
+            "script_path": script_path,
+            "project_dir": project_dir,
+            "output_dir": self.output_dir_edit.text().strip() or None,
+            "icon_path": self.icon_path_edit.text().strip() or None,
+            "program_name": self.program_name_edit.text().strip() or None,
+            "python_path": self.python_path_edit.text().strip() or None,
+            "tool": "nuitka" if self.nuitka_radio.isChecked() else "pyinstaller",
+            "gcc_path": self.gcc_path_edit.text().strip() or None,
+            "onefile": self.onefile_check.isChecked(),
+            "console": self.console_check.isChecked(),
+            "clean": self.clean_check.isChecked(),
+            "upx": self.upx_check.isChecked(),
+            "lto": self.lto_check.isChecked(),
+            "python_opt": self.python_opt_check.isChecked(),
+            "exclude_modules": exclude_modules,
+        }
+
+    # =========================================================================
+    # Button State Management
+    # =========================================================================
+
+    def set_buttons_enabled(self, enabled: bool) -> None:
+        """Set button enabled states"""
+        self.package_btn.setEnabled(enabled)
+        self.analyze_btn.setEnabled(enabled)
+        self.clear_btn.setEnabled(enabled)
+
+    def _set_cancel_button_style(self) -> None:
+        """Set cancel button red warning style"""
+        style = self.theme_manager.get_danger_button_style()
+        self.package_btn.setStyleSheet(style)
+
+    def _reset_package_button_style(self) -> None:
+        """Reset package button to default style"""
+        self.package_btn.setStyleSheet("")
+
+    # =========================================================================
+    # Message Box Helpers
+    # =========================================================================
+
+    def _create_message_box(self, icon_type: QMessageBox.Icon, title: str, text: str) -> QMessageBox:
+        """Create themed message box"""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(icon_type)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(text)
+        msg_box.setStyleSheet(self.theme_manager.get_message_box_style())
+        return msg_box
+
+    def _show_info(self, title: str, text: str) -> None:
+        """Show information message box"""
+        msg_box = self._create_message_box(QMessageBox.Icon.Information, title, text)
+        msg_box.exec()
+
+    def _show_warning(self, title: str, text: str) -> None:
+        """Show warning message box"""
+        msg_box = self._create_message_box(QMessageBox.Icon.Warning, title, text)
+        msg_box.exec()
+
+    def _show_error(self, title: str, text: str) -> None:
+        """Show error message box"""
+        msg_box = self._create_message_box(QMessageBox.Icon.Critical, title, text)
+        msg_box.exec()
+
+    # =========================================================================
+    # Dependency Analysis
+    # =========================================================================
+
+    def analyze_dependencies(self) -> None:
+        """Analyze project dependencies"""
+        script_path = self.script_path_edit.text().strip()
+        if not script_path:
+            self._show_warning("警告", "请先选择运行脚本！")
+            return
+
+        if not os.path.exists(script_path):
+            self._show_warning("警告", "脚本文件不存在！")
+            return
+
+        self.log_text.clear()
+        self.append_log("=" * 50)
+        self.append_log("开始分析项目依赖...")
+        self.append_log("=" * 50)
+
+        self.set_buttons_enabled(False)
+
+        project_dir = self.project_dir_edit.text().strip()
+
+        def task():
+            try:
+                analyzer = DependencyAnalyzer()
+
+                def log_callback(msg: str) -> None:
+                    self.log_signal.emit(msg)
+
+                self.log_signal.emit(f"分析脚本: {script_path}")
+
+                # Analyze dependencies - returns a Set[str]
+                deps = analyzer.analyze(script_path, project_dir or None)
+
+                self.log_signal.emit("\n发现的依赖模块:")
+                for dep in sorted(deps):
+                    self.log_signal.emit(f"  - {dep}")
+
+                # Find excludable modules using existing method
+                excludable = analyzer.get_exclude_modules()
+                if excludable:
+                    exclude_str = ",".join(excludable)
+                    self.update_exclude_modules_signal.emit(exclude_str)
+                    self.log_signal.emit(f"\n建议排除的模块: {exclude_str}")
+
+                self.log_signal.emit("\n" + "=" * 50)
+                self.log_signal.emit("依赖分析完成！")
+                self.log_signal.emit("=" * 50)
+
+            except Exception as e:
+                self.log_signal.emit(f"分析过程发生错误: {str(e)}")
+            finally:
+                # Re-enable buttons via signal
+                QMetaObject.invokeMethod(
+                    self, "_on_analyze_finished",
+                    Qt.ConnectionType.QueuedConnection
+                )
+
+        threading.Thread(target=task, daemon=True).start()
+
+    @pyqtSlot()
+    def _on_analyze_finished(self) -> None:
+        """Handle analyze finished"""
+        self.set_buttons_enabled(True)
+
+    def update_exclude_modules_ui(self, modules: str) -> None:
+        """Update exclude modules text"""
+        current = self.exclude_modules_edit.text().strip()
+        if current:
+            # Merge with existing
+            existing = set(m.strip() for m in current.split(',') if m.strip())
+            new_modules = set(m.strip() for m in modules.split(',') if m.strip())
+            merged = existing.union(new_modules)
+            self.exclude_modules_edit.setText(",".join(sorted(merged)))
+        else:
+            self.exclude_modules_edit.setText(modules)
+
+    def update_download_progress_ui(self, progress: str) -> None:
+        """Update download progress label"""
+        self.gcc_download_label.setText(progress)
+
+    # =========================================================================
+    # GCC Configuration
+    # =========================================================================
+
+    def get_nuitka_cache_dir(self) -> str:
+        """Get Nuitka cache directory"""
+        user_home = os.path.expanduser("~")
+        return os.path.join(user_home, "AppData", "Local", "Nuitka", "Nuitka", "Cache", "downloads")
+
+    def find_gcc_in_cache(self) -> Optional[str]:
+        """Find GCC mingw directory in Nuitka cache"""
+        # 使用GCCDownloader的静态方法查找有效的mingw目录
+        return GCCDownloader.get_default_mingw_path()
+
+    def load_gcc_config(self) -> None:
+        """Load GCC configuration (mingw directory)"""
+        if self.gcc_config_loading:
+            return
+
+        self.gcc_config_loading = True
+
+        try:
+            # 首先尝试从配置文件加载
+            if os.path.exists(self.gcc_config_file):
+                with open(self.gcc_config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    gcc_path = config.get('gcc_path', '')
+                    if gcc_path and os.path.exists(gcc_path):
+                        # 验证路径是否是有效的mingw目录
+                        is_valid, _ = validate_mingw_directory(gcc_path)
+                        if is_valid:
+                            self.gcc_path_edit.setText(gcc_path)
+                            self.gcc_config_loaded = True
+                            self.gcc_config_loading = False
+                            self._update_gcc_download_button_visibility()
+                            return
+
+            # 尝试在Nuitka缓存中查找mingw目录
+            cached_gcc = self.find_gcc_in_cache()
+            if cached_gcc:
+                self.gcc_path_edit.setText(cached_gcc)
+                self.save_gcc_config()
+
+            self.gcc_config_loaded = True
+            self._update_gcc_download_button_visibility()
+
+        except Exception as e:
+            print(f"加载GCC配置失败: {e}")
+        finally:
+            self.gcc_config_loading = False
+
+    def _update_gcc_download_button_visibility(self) -> None:
+        """根据GCC路径可用性更新GCC下载按钮的可见性"""
+        gcc_path = self.gcc_path_edit.text().strip()
+        # Hide the download button if GCC path is set and is a valid mingw directory
+        if gcc_path and os.path.exists(gcc_path):
+            is_valid, _ = validate_mingw_directory(gcc_path)
+            if is_valid:
+                self.gcc_download_btn.setVisible(False)
+                return
+                self.gcc_download_btn.setVisible(True)
+
+    def save_gcc_config(self) -> None:
+        """保存GCC配置"""
+        try:
+            gcc_path = self.gcc_path_edit.text().strip()
+            config = {'gcc_path': gcc_path}
+            with open(self.gcc_config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存GCC配置失败: {e}")
+
+    def download_gcc(self) -> None:
+        """下载GCC工具链（支持多线程下载、重试、验证和自动解压）"""
+        if self.is_downloading:
+            # 取消下载
+            self.cancel_download = True
+            self.gcc_download_btn.setText("自动下载")
+            self.gcc_download_btn.setStyleSheet("")  # 重置为默认样式
+            self.gcc_download_label.setText("正在取消...")
+            return
+
+        self.is_downloading = True
+        self.cancel_download = False
+        self.gcc_download_btn.setText("取消下载")
+        # 应用与取消打包按钮相同的危险按钮样式
+        style = self.theme_manager.get_danger_button_style()
+        self.gcc_download_btn.setStyleSheet(style)
+        self.gcc_download_label.setText("准备下载...")
+
+        def download_task():
+            try:
+                # 创建日志和进度回调
+                def log_callback(msg: str) -> None:
+                    self.log_signal.emit(msg)
+
+                def progress_callback(msg: str) -> None:
+                    self.update_download_progress_signal.emit(msg)
+
+                def cancel_check() -> bool:
+                    return self.cancel_download
+
+                # 使用GCCDownloader进行下载和解压
+                downloader = GCCDownloader(
+                    log_callback=log_callback,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                )
+
+                # 首先检查是否已存在有效的mingw目录
+                existing_mingw = downloader.find_existing_gcc()
+                if existing_mingw:
+                    self.update_download_progress_signal.emit("发现已存在的有效GCC工具链")
+                    QMetaObject.invokeMethod(
+                        self.gcc_path_edit, "setText",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(str, existing_mingw)
+                    )
+                    self.save_gcc_config()
+                    self.update_download_progress_signal.emit("已加载现有工具链")
+                    return
+
+                # 执行下载和解压（download方法会自动下载、验证、解压并返回mingw目录路径）
+                result_path = downloader.download()
+
+                if self.cancel_download:
+                    self.update_download_progress_signal.emit("下载已取消")
+                elif result_path:
+                    self.update_download_progress_signal.emit("下载并解压完成！")
+                    # 在UI中更新GCC路径（result_path现在是mingw目录）
+                    QMetaObject.invokeMethod(
+                        self.gcc_path_edit, "setText",
+                        Qt.ConnectionType.QueuedConnection,
+                        Q_ARG(str, result_path)
+                    )
+                    self.save_gcc_config()
+                else:
+                    # 下载失败，在主线程显示提示对话框
+                    self.update_download_progress_signal.emit("下载失败")
+                    QMetaObject.invokeMethod(
+                        self, "_show_gcc_download_failed_dialog",
+                        Qt.ConnectionType.QueuedConnection
+                    )
+
+            except Exception as e:
+                self.update_download_progress_signal.emit(f"下载出错: {str(e)}")
+                QMetaObject.invokeMethod(
+                    self, "_show_gcc_download_failed_dialog",
+                    Qt.ConnectionType.QueuedConnection
+                )
+            finally:
+                self.is_downloading = False
+                QMetaObject.invokeMethod(
+                    self.gcc_download_btn, "setText",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, "自动下载")
+                )
+                # Reset button style to default
+                QMetaObject.invokeMethod(
+                    self.gcc_download_btn, "setStyleSheet",
+                    Qt.ConnectionType.QueuedConnection,
+                    Q_ARG(str, "")
+                )
+
+        self.download_thread = threading.Thread(target=download_task, daemon=True)
+        self.download_thread.start()
+
+    @pyqtSlot()
+    def _show_gcc_download_failed_dialog(self) -> None:
+        """Show dialog when GCC download fails, prompting user to download manually"""
+        # 根据系统架构提示下载对应版本
+        arch = GCCDownloader.get_system_arch()
+        if arch == "x86_64":
+            arch_hint = "x86_64-posix-seh"
+        else:
+            arch_hint = "i686-posix-dwarf"
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle("GCC下载失败")
+        msg_box.setText(
+            "自动下载GCC工具链失败，可能是网络问题。\n\n"
+            "您可以：\n"
+            "1. 点击「重试」再次尝试自动下载\n"
+            "2. 点击「手动下载」打开下载页面，下载zip文件后手动解压到：\n"
+            f"   {GCCDownloader.get_nuitka_cache_dir()}\n"
+            "   然后使用「浏览」按钮选择解压后的 mingw64 或 mingw32 目录\n\n"
+            "下载地址：\n"
+            "https://github.com/brechtsanders/winlibs_mingw/releases/latest\n\n"
+            f"请下载包含 {arch_hint} 的zip文件（当前系统架构: {arch}）。"
+        )
+        retry_btn = msg_box.addButton("重试", QMessageBox.ButtonRole.AcceptRole)
+        manual_btn = msg_box.addButton("手动下载", QMessageBox.ButtonRole.ActionRole)
+        msg_box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+
+        msg_box.exec()
+
+        clicked_btn = msg_box.clickedButton()
+        if clicked_btn == retry_btn:
+            # 重新开始下载
+            self.download_gcc()
+        elif clicked_btn == manual_btn:
+            # 打开浏览器
+            webbrowser.open("https://github.com/brechtsanders/winlibs_mingw/releases/latest")
+
+    # =========================================================================
+    # Packaging Operations
+    # =========================================================================
+
+    def toggle_packaging(self) -> None:
+        """Toggle packaging state"""
+        if self.is_packaging:
+            self.cancel_packaging_process()
+        else:
+            self.start_packaging()
+
+    def cancel_packaging_process(self) -> None:
+        """Cancel packaging process"""
+        self.append_log("\n请求取消打包...")
+        self.cancel_packaging = True
+
+        # Terminate packaging process
+        if self.packaging_process:
+            try:
+                self.packaging_process.terminate()
+                self.append_log("正在终止打包进程...")
+                # 尝试强制终止
+                try:
+                    self.packaging_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.packaging_process.kill()
+                    self.append_log("已强制终止进程")
+            except Exception as e:
+                self.append_log(f"终止进程时出错: {str(e)}")
+
+        # Cancel worker if using QThreadPool
+        if self._current_packaging_worker:
+            self._current_packaging_worker.cancel()
+
+        # 更新按钮文本显示取消中状态，但不完全重置
+        # 状态重置会在 on_packaging_finished 中完成
+        self.package_btn.setText("取消中...")
+        self.package_btn.setEnabled(False)
+
+    def start_packaging(self) -> None:
+        """Start packaging process"""
+        script_path = self.script_path_edit.text().strip()
+        if not script_path:
+            self._show_warning("警告", "请选择运行脚本！")
+            return
+
+        if not os.path.exists(script_path):
+            self._show_warning("警告", "脚本文件不存在！")
+            return
+
+        # Validate GCC path for Nuitka
+        if self.nuitka_radio.isChecked():
+            gcc_path = self.gcc_path_edit.text().strip()
+            if gcc_path and not gcc_path.endswith(".zip") and not os.path.isdir(gcc_path):
+                self._show_warning("警告", "GCC路径必须是.zip文件或目录！")
+                return
+
+        config = self.get_config()
+
+        self.log_text.clear()
+        self.append_log("=" * 50)
+        self.append_log("开始打包流程...")
+        self.append_log(f"工具: {config['tool']}")
+        self.append_log(f"脚本: {config['script_path']}")
+        if config.get('exclude_modules'):
+            self.append_log(f"排除模块: {', '.join(config['exclude_modules'])}")
+        self.append_log("=" * 50)
+
+        # Set packaging state
+        self.is_packaging = True
+        self.cancel_packaging = False
+        self.packaging_process = None
+        self.package_btn.setText("取消打包")
+        self._set_cancel_button_style()
+
+        # Disable other buttons
+        self.analyze_btn.setEnabled(False)
+        self.clear_btn.setEnabled(False)
+
+        def task():
+            try:
+                def log_callback(msg: str) -> None:
+                    self.log_signal.emit(msg)
+
+                def process_callback(process: subprocess.Popen) -> None:
+                    self.packaging_process = process
+
+                packager = Packager()
+                success, message, exe_path = packager.package(
+                    config,
+                    log_callback=log_callback,
+                    cancel_flag=lambda: self.cancel_packaging,
+                    process_callback=process_callback
+                )
+
+                if success:
+                    self.log_signal.emit("\n" + "=" * 50)
+                    self.log_signal.emit("打包成功！")
+                    self.log_signal.emit("=" * 50)
+
+                    self.finished_signal.emit(True, message)
+
+                    if exe_path:
+                        self.open_output_directory(exe_path)
+                else:
+                    self.log_signal.emit("\n" + "=" * 50)
+                    self.log_signal.emit("打包失败！")
+                    self.log_signal.emit("=" * 50)
+                    self.finished_signal.emit(False, message)
+
+            except Exception as e:
+                self.log_signal.emit(f"打包过程发生错误: {str(e)}")
+                self.finished_signal.emit(False, str(e))
+
+        threading.Thread(target=task, daemon=True).start()
+
+    def on_packaging_finished(self, success: bool, message: str) -> None:
+        """Handle packaging finished"""
+        # Reset state
+        was_cancelled = self.cancel_packaging
+
+        self.is_packaging = False
+        self.cancel_packaging = False
+        self.packaging_process = None
+        self._current_packaging_worker = None
+        self.package_btn.setText("开始打包")
+        self.package_btn.setEnabled(True)
+        self._reset_package_button_style()
+
+        self.set_buttons_enabled(True)
+
+        # Don't show message box if cancelled
+        if was_cancelled:
+            self.append_log("打包已取消")
+            return
+
+        if success:
+            self._show_info("成功", message)
+        else:
+            self._show_error("失败", message)
+
+    def open_output_directory(self, exe_path: str) -> None:
+        """Open output directory and select the exe file"""
+        try:
+            import platform
+
+            if not os.path.exists(exe_path):
+                self.append_log(f"文件不存在: {exe_path}")
+                return
+
+            directory = os.path.dirname(exe_path)
+            system = platform.system()
+
+            if system == "Windows":
+                # 使用 os.startfile 打开目录，避免 explorer 的路径问题
+                # 或使用 shell=True 的方式调用 explorer
+                try:
+                    # 方法1：直接打开目录（更稳定）
+                    os.startfile(directory)
+                except Exception:
+                    # 方法2：使用 shell 命令打开并选中文件
+                    try:
+                        normalized_path = os.path.normpath(exe_path)
+                        # 使用 shell=True 避免路径解析问题
+                        subprocess.run(
+                            f'explorer /select,"{normalized_path}"',
+                            shell=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
+                    except Exception:
+                        # 方法3：仅打开目录
+                        subprocess.run(
+                            f'explorer "{os.path.normpath(directory)}"',
+                            shell=True,
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
+            elif system == "Darwin":
+                subprocess.Popen(['open', '-R', exe_path])
+            else:
+                try:
+                    subprocess.Popen(['xdg-open', directory])
+                except Exception:
+                    subprocess.Popen(['nautilus', directory])
+
+            self.append_log(f"\n已打开输出目录: {directory}")
+
+        except Exception as e:
+            self.append_log(f"打开目录时出错: {str(e)}")
