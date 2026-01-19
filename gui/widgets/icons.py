@@ -1,32 +1,68 @@
 """
 图标生成器工具 - PyQt6最佳实践实现
 
-本模块提供使用Qt原生绘图功能生成主题图标的工具函数。
-
-此方法的优势：
-1. 无需外部图像文件
-2. 图标在任何DPI下都能完美缩放
-3. 支持主题感知的图标生成
-4. 减小应用程序体积
-5. 运行时无需文件I/O进行图标生成
+使用Qt原生绘图功能生成主题图标，支持任意DPI完美缩放。
 """
 
 import os
 import sys
 import tempfile
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 
+# 主题图标文件名
+THEME_ICONS = ("check_light.png", "check_dark.png", "radio_light.png", "radio_dark.png")
+
+
+def _find_resource_file(filename: str) -> Optional[str]:
+    """
+    查找资源文件路径（兼容开发模式和打包后的exe）。
+    
+    参数:
+        filename: 文件名（不含目录）
+    
+    返回:
+        找到的文件完整路径，未找到则返回None
+    """
+    search_paths: List[str] = []
+
+    if getattr(sys, 'frozen', False):
+        # 打包模式
+        exe_dir = os.path.dirname(sys.executable)
+        meipass = getattr(sys, '_MEIPASS', None)
+        
+        if meipass:
+            search_paths.extend([
+                os.path.join(meipass, filename),
+                os.path.join(meipass, "resources", "icons", filename),
+            ])
+        
+        search_paths.extend([
+            os.path.join(exe_dir, filename),
+            os.path.join(exe_dir, "resources", "icons", filename),
+            os.path.join(os.getcwd(), filename),
+            os.path.join(os.getcwd(), "resources", "icons", filename),
+        ])
+    else:
+        # 开发模式：从当前文件向上三级找项目根目录
+        current_file = os.path.abspath(__file__)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
+        search_paths.append(os.path.join(project_root, "resources", "icons", filename))
+
+    for path in search_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
 class IconGenerator:
     """
     使用Qt原生绘图生成主题图标。
-
-    此类提供以编程方式创建图标的方法，
-    避免需要外部图像文件，并确保
-    在任何DPI下都能完美缩放。
+    
+    支持程序化创建图标，无需外部图像文件，任意DPI下完美缩放。
     """
 
     # 默认强调色（Windows 10/11蓝色）
@@ -37,13 +73,9 @@ class IconGenerator:
         初始化图标生成器。
 
         参数:
-            cache_dir: 缓存生成的图标文件的目录。
-                      如果为None，则使用系统临时目录。
+            cache_dir: 缓存目录，None时使用系统临时目录
         """
-        if cache_dir is None:
-            cache_dir = os.path.join(tempfile.gettempdir(), "python_packaging_tool")
-
-        self._cache_dir = cache_dir
+        self._cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), "python_packaging_tool")
         self._ensure_cache_dir()
 
     def _ensure_cache_dir(self) -> None:
@@ -51,12 +83,11 @@ class IconGenerator:
         try:
             os.makedirs(self._cache_dir, exist_ok=True)
         except Exception:
-            # 如果创建失败，回退到临时目录
             self._cache_dir = tempfile.gettempdir()
 
     @property
     def cache_dir(self) -> str:
-        """获取缓存目录路径"""
+        """缓存目录路径"""
         return self._cache_dir
 
     def create_checkmark_pixmap(
@@ -200,103 +231,36 @@ class IconGenerator:
         accent_color: str = DEFAULT_ACCENT_COLOR,
     ) -> Tuple[str, str, str, str]:
         """
-        生成应用程序所需的所有主题图标。
+        获取应用程序所需的所有主题图标路径。
 
         参数:
-            accent_color: 图标的强调色
+            accent_color: 已废弃，保留以兼容旧代码
 
         返回:
-            元组，包含(浅色勾选, 深色勾选, 浅色单选, 深色单选)路径
+            (浅色勾选, 深色勾选, 浅色单选, 深色单选) 路径元组
         """
-        check_light = self.save_checkmark_icon("check_light.png", color=accent_color)
-        check_dark = self.save_checkmark_icon("check_dark.png", color=accent_color)
-        radio_light = self.save_radio_icon("radio_light.png", color=accent_color)
-        radio_dark = self.save_radio_icon("radio_dark.png", color=accent_color)
-
-        return check_light, check_dark, radio_light, radio_dark
+        return tuple(self.get_icon_path(name) for name in THEME_ICONS)  # type: ignore
 
     def get_icon_path(self, name: str) -> str:
         """
-        获取缓存图标文件的路径。
+        获取图标文件路径。
 
         参数:
-            name: 图标文件名或相对路径（例如："check_dark.png" 或 "resources/icons/check_dark.png"）
+            name: 图标文件名或相对路径
 
         返回:
-            图标文件的完整路径（在缓存目录中）
+            图标完整路径（优先资源目录，回退到缓存目录）
         """
-        # 提取文件名部分（忽略路径）
         simple_name = os.path.basename(name)
-        cache_path = os.path.join(self._cache_dir, simple_name)
-
-        # 如果缓存中存在，直接返回
-        if os.path.exists(cache_path):
-            return cache_path
-
-        # 如果缓存中不存在，尝试从资源目录复制或生成
-        # 首先尝试从项目资源目录查找
-        resource_path = self._get_resource_file_path(name)
-        if resource_path and os.path.exists(resource_path):
-            return resource_path
-
-        # 如果都找不到，返回缓存路径（可能需要后续生成）
-        return cache_path
-
-    def _get_resource_file_path(self, relative_path: str) -> Optional[str]:
-        """
-        获取资源文件路径（兼容打包后的exe）
-
-        参数:
-            relative_path: 相对路径或文件名
-
-        返回:
-            资源文件的完整路径，如果找不到则返回None
-        """
-        # 提取文件名
-        filename = os.path.basename(relative_path)
-
-        if getattr(sys, 'frozen', False):
-            # 打包后的exe模式
-            exe_dir = os.path.dirname(sys.executable)
-
-            possible_paths = [
-                # 直接在exe目录下
-                os.path.join(exe_dir, filename),
-                # 在resources/icons目录下
-                os.path.join(exe_dir, "resources", "icons", filename),
-                # 在当前工作目录下
-                os.path.join(os.getcwd(), filename),
-                os.path.join(os.getcwd(), "resources", "icons", filename),
-            ]
-
-            # PyInstaller的_MEIPASS
-            meipass = getattr(sys, '_MEIPASS', None)
-            if meipass:
-                possible_paths.insert(0, os.path.join(meipass, filename))
-                possible_paths.insert(1, os.path.join(meipass, "resources", "icons", filename))
-
-            for path in possible_paths:
-                if os.path.exists(path):
-                    return path
-
-            return None
-        else:
-            # 开发模式
-            # 获取项目根目录（从 gui/widgets/icons.py 向上三级）
-            current_file = os.path.abspath(__file__)
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-
-            # 尝试几种可能的路径
-            possible_paths = [
-                os.path.join(project_root, "resources", "icons", filename),
-                os.path.join(project_root, relative_path),
-            ]
-
-            for path in possible_paths:
-                if os.path.exists(path):
-                    return path
-
-            return None
+        
+        # 主题图标优先从资源目录查找
+        if simple_name in THEME_ICONS or "resources" in name:
+            resource_path = _find_resource_file(simple_name)
+            if resource_path:
+                return resource_path
+        
+        # 回退到缓存路径
+        return os.path.join(self._cache_dir, simple_name)
 
     def create_app_icon(
         self,

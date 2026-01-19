@@ -1,17 +1,19 @@
+"""
+依赖管理器
+
+负责自动下载和安装UPX、GCC等工具，支持多镜像源pip安装。
+"""
+
 import os
 import subprocess
 import sys
-import winreg
 import zipfile
-from typing import Callable, Optional, cast
+from typing import Callable, List, Optional
 
 import requests
 
 # Windows 子进程隐藏标志
-if sys.platform == "win32":
-    CREATE_NO_WINDOW = 0x08000000
-else:
-    CREATE_NO_WINDOW = 0
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 class DependencyManager:
@@ -87,48 +89,37 @@ class DependencyManager:
 
     def add_to_system_path(self, directory: str) -> bool:
         """将目录永久添加到系统PATH环境变量"""
+        if sys.platform != "win32":
+            return False
+            
         try:
-            # 打开用户环境变量注册表项
+            import ctypes
+            import winreg
+            
             key = winreg.OpenKey(
-                winreg.HKEY_CURRENT_USER,
-                r"Environment",
-                0,
+                winreg.HKEY_CURRENT_USER, r"Environment", 0,
                 winreg.KEY_READ | winreg.KEY_WRITE
             )
 
-            # 读取当前PATH
             try:
                 current_path, _ = winreg.QueryValueEx(key, "Path")
             except FileNotFoundError:
                 current_path = ""
 
-            # 检查目录是否已在PATH中
             paths = [p.strip() for p in current_path.split(';') if p.strip()]
             directory = os.path.normpath(directory)
 
             if directory not in paths:
-                # 添加新路径
                 paths.append(directory)
-                new_path = ';'.join(paths)
-
-                # 写入注册表
-                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+                winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, ';'.join(paths))
                 self.log(f"已将 {directory} 添加到系统PATH")
 
                 # 广播环境变量变更消息
-                import ctypes
-                HWND_BROADCAST = 0xFFFF
-                WM_SETTINGCHANGE = 0x001A
-                ctypes.windll.user32.SendMessageW(
-                    HWND_BROADCAST,
-                    WM_SETTINGCHANGE,
-                    0,
-                    "Environment"
-                )
+                ctypes.windll.user32.SendMessageW(0xFFFF, 0x001A, 0, "Environment")
 
             winreg.CloseKey(key)
 
-            # 同时添加到当前进程的PATH
+            # 添加到当前进程PATH
             if directory not in os.environ["PATH"]:
                 os.environ["PATH"] = directory + os.pathsep + os.environ["PATH"]
 

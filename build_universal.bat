@@ -1,95 +1,102 @@
 @echo off
-:: Force UTF-8 encoding and clear screen
+REM Force UTF-8 encoding and clear screen
 chcp 65001 >nul 2>&1
+if errorlevel 1 chcp 936 >nul 2>&1
 cls
+if errorlevel 1 echo.
 setlocal enabledelayedexpansion
 
-:: ============================================
-:: Check admin privileges and auto-elevate
-:: ============================================
+REM ============================================
+REM Check admin privileges and auto-elevate
+REM ============================================
 >nul 2>&1 "%SYSTEMROOT%\system32\cacls.exe" "%SYSTEMROOT%\system32\config\system"
 
 if '%errorlevel%' NEQ '0' (
 
-    :: Create temp VBS script for elevation
+    REM Create temp VBS script for elevation
     echo Set UAC = CreateObject^("Shell.Application"^) > "%temp%\getadmin.vbs"
     echo UAC.ShellExecute "%~s0", "", "", "runas", 1 >> "%temp%\getadmin.vbs"
 
-    :: Run VBS script
+    REM Run VBS script
     "%temp%\getadmin.vbs"
 
-    :: Exit current non-admin script
+    REM Exit current non-admin script
     exit /b
 ) else (
-    :: Delete temp VBS file if exists
+    REM Delete temp VBS file if exists
     if exist "%temp%\getadmin.vbs" ( del "%temp%\getadmin.vbs" )
 )
 
-:: ============================================
-:: Change back to script directory after elevation
-:: ============================================
+REM ============================================
+REM Change back to script directory after elevation
+REM ============================================
 cd /d "%~dp0"
 
 
-:: ============================================
-:: Universal Python Project Build Script v2.0
-:: Nuitka Compilation with Time Tracking & Error Logging
-:: ============================================
+REM ============================================
+REM Universal Python Project Build Script v2.0
+REM Nuitka Compilation with Time Tracking & Error Logging
+REM ============================================
 
-:: ============================================
-:: Configuration section - Modify according to your project
-:: ============================================
+REM ============================================
+REM Configuration section - Modify according to your project
+REM ============================================
 
-:: Project basic information
+REM Project basic information (will be auto-detected from version.py if exists)
+REM These are fallback values if version.py is not found
 set "PROJECT_NAME=Python Packaging Tool"
 set "PROJECT_DISPLAY_NAME=Python Packaging Tool"
 set "COMPANY_NAME=WKLAN.CN"
 set "PROJECT_DESCRIPTION=Python Packaging Tool"
 set "PROJECT_VERSION=1.0"
+set "PROJECT_COPYRIGHT=Copyright © 2026"
 
-:: Note: Version supports simplified format, will auto-convert to Windows standard format
+REM Auto-detect version info from version.py (set to true to enable)
+set "AUTO_DETECT_VERSION=true"
 
-:: Main entry file relative to project root
+REM Note: Version supports simplified format, will auto-convert to Windows standard format
+
+REM Main entry file relative to project root
 set "MAIN_FILE=main.py"
 
-:: Output executable name without .exe suffix
-set "OUTPUT_EXE_NAME=python_packaging_tool"
+REM Output executable name without .exe suffix
+set "OUTPUT_EXE_NAME=Python打包工具"
 
-:: Icon file relative to project root, leave empty for no icon
+REM Icon file relative to project root, leave empty for no icon
 set "ICON_FILE=resources\icons\icon.ico"
 
-:: Show console window: true=show, false=hide
+REM Show console window: true=show, false=hide
 set "SHOW_CONSOLE=false"
 
-:: Include Python packages (space-separated, leave empty to auto-detect)
-:: Project packages: gui, core, utils
-:: Third-party packages: requests (PyQt6 auto-detected by Nuitka)
+REM Include Python packages (space-separated, leave empty to auto-detect)
+REM Project packages: gui, core, utils
+REM Third-party packages: requests (PyQt6 auto-detected by Nuitka)
 set "INCLUDE_PACKAGES=requests gui core utils"
 
-:: Exclude imports (space-separated)
-:: Auto-exclude test/dev tools and unnecessary dependencies
-:: Note: PyQt6 is NOT excluded as it's used by this project
+REM Exclude imports (space-separated)
+REM Auto-exclude test/dev tools and unnecessary dependencies
+REM Note: PyQt6 is NOT excluded as it's used by this project
 set "EXCLUDE_IMPORTS=pytest test unittest doctest coverage nose mock tox setuptools wheel pip distutils pkg_resources sphinx docutils IPython jupyter notebook ipython ipykernel matplotlib seaborn pandas numpy scipy sklearn tensorflow torch cv2 opencv PIL pillow tkinter wxpy wxpython PyQt5 PySide2 PySide6 PyQt4 PySide polib"
 
-:: Extra Nuitka arguments, leave empty for defaults
+REM Extra Nuitka arguments, leave empty for defaults
 set "EXTRA_NUITKA_ARGS="
 
-:: Windows 10/11 compatibility mode: true=enabled, false=standard
+REM Windows 10/11 compatibility mode: true=enabled, false=standard
 set "WIN10_COMPAT_MODE=true"
 
-:: Enable LTO (Link Time Optimization): true=enabled, false=disabled
-:: Reduces executable size and improves performance (slightly increases compile time)
+REM Enable LTO (Link Time Optimization): true=enabled, false=disabled
+REM Reduces executable size and improves performance (slightly increases compile time)
 set "ENABLE_LTO=true"
 
-:: Enable Python optimization: true=enabled, false=disabled
-:: Removes docstrings, disables asserts, enables Python -O flag
+REM Enable Python optimization: true=enabled, false=disabled
+REM Removes docstrings, disables asserts, enables Python -O flag
 set "ENABLE_PYTHON_OPT=true"
 
-:: ============================================
-:: Script body below, usually no need to modify
-:: ============================================
+REM ============================================
+REM Script body below, usually no need to modify
+REM ============================================
 
-:: Error handling
+REM Error handling
 if errorlevel 1 (
     echo Warning: Failed to set UTF-8 encoding, may cause display issues
 )
@@ -101,34 +108,41 @@ echo   Universal Nuitka Compilation System
 echo ============================================
 echo.
 
-:: Set project root and build directories
+REM Set project root and build directories
 set "PROJECT_ROOT=%~dp0"
 set "BUILD_DIR=%PROJECT_ROOT%build"
 set "TEMP_DIR=%BUILD_DIR%\temp"
 set "VENV_DIR=%PROJECT_ROOT%.venv"
-:: exe files directly in build directory, no dist subdirectory
+REM exe files directly in build directory, no dist subdirectory
 set "DIST_DIR=%BUILD_DIR%"
 
-:: Record start time
+REM ============================================
+REM Auto-detect version info from version.py
+REM ============================================
+if /i "!AUTO_DETECT_VERSION!"=="true" (
+    call :detect_version_info
+)
+
+REM Record start time
 set "START_TIME=%time%"
 set "START_DATE=%date%"
 
-:: Set error log file (now records all output)
-set "ERROR_LOG=%BUILD_DIR%\build_error.log"
+REM Set build log file (records all output)
+set "ERROR_LOG=%BUILD_DIR%\build.log"
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" 2>nul
 echo ============================================ > "%ERROR_LOG%"
-echo Build Error Log - %PROJECT_DISPLAY_NAME% >> "%ERROR_LOG%"
+echo Build Log - %PROJECT_DISPLAY_NAME% >> "%ERROR_LOG%"
 echo Started at: %START_DATE% %START_TIME% >> "%ERROR_LOG%"
 echo ============================================ >> "%ERROR_LOG%"
 echo. >> "%ERROR_LOG%"
 
-:: Define log function immediately after ERROR_LOG is set
-:: Jump over the function definition to continue with main script
+REM Define log function immediately after ERROR_LOG is set
+REM Jump over the function definition to continue with main script
 goto :after_log_echo_def
 :log_echo
 set "LOG_MSG=%~1"
 if "!LOG_MSG!"=="" (
-    echo.
+echo.
     if defined ERROR_LOG echo. >> "%ERROR_LOG%"
 ) else (
     echo !LOG_MSG!
@@ -140,34 +154,37 @@ goto :eof
 call :log_echo [TIME] Build started at: %START_DATE% %START_TIME%
 call :log_echo ""
 
-:: Display configuration info
+REM Display configuration info
 call :log_echo [CONFIG] Project Configuration:
 call :log_echo   Project Name: !PROJECT_NAME!
+call :log_echo   Version: !PROJECT_VERSION!
+call :log_echo   Copyright: !PROJECT_COPYRIGHT!
 call :log_echo   Main File: !MAIN_FILE!
 call :log_echo   Output Name: !OUTPUT_EXE_NAME!.exe
 call :log_echo   Console Mode: !SHOW_CONSOLE!
 call :log_echo   Win10 Compat: !WIN10_COMPAT_MODE!
 call :log_echo   LTO Optimization: !ENABLE_LTO!
 call :log_echo   Python Optimization: !ENABLE_PYTHON_OPT!
+call :log_echo   Auto-Detect Version: !AUTO_DETECT_VERSION!
 call :log_echo ""
 
-:: Set GCC cache path, auto-detect system arch and get latest version
+REM Set GCC cache path, auto-detect system arch and get latest version
 set "GCC_DOWNLOAD_DIR=%LOCALAPPDATA%\Nuitka\Nuitka\Cache\downloads"
-:: Detect system arch and get latest GCC version
+REM Detect system arch and get latest GCC version
 call :detect_system_arch_and_get_gcc
 
-:: Network connection pre-check
+REM Network connection pre-check
 call :log_echo [Pre-check] Running network diagnostics...
 call :check_network_advanced 2>nul
 if errorlevel 1 call :log_echo [Info] Network check completed with warnings
 
-:: Smart GCC cache management
+REM Smart GCC cache management
 call :log_echo [GCC Manager] Smart checking GCC compiler cache...
 call :manage_gcc_cache
 
-:: Select Python interpreter: prefer project virtualenv, otherwise use system Python
+REM Select Python interpreter: prefer project virtualenv, otherwise use system Python
 if exist "%VENV_DIR%\Scripts\python.exe" (
-    call :log_echo [Info] Using project virtualenv Python: "%VENV_DIR%\Scripts\python.exe"
+    echo [Info] Project virtualenv Python: "%VENV_DIR%\Scripts\python.exe"
     set "PYTHON_EXE=%VENV_DIR%\Scripts\python.exe"
     if exist "%VENV_DIR%\Scripts\pip.exe" (
         set "PIP_EXE=%VENV_DIR%\Scripts\pip.exe"
@@ -175,16 +192,16 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
         set "PIP_EXE=%VENV_DIR%\Scripts\python.exe -m pip"
     )
 ) else (
-    call :log_echo [Info] Virtual environment not found, using system Python
+    echo [Info] Virtual environment not found, system Python will be used
     set "PYTHON_EXE=python"
     set "PIP_EXE=pip"
 )
 
-:: Validate Python environment
+REM Validate Python environment
 call :log_echo [Check] Validating Python environment...
 "%PYTHON_EXE%" --version >> "%ERROR_LOG%" 2>&1
 if errorlevel 1 (
-    "%PYTHON_EXE%" --version >nul 2>&1
+"%PYTHON_EXE%" --version >nul 2>&1
 )
 if !errorlevel! neq 0 (
     echo.
@@ -201,7 +218,7 @@ if !errorlevel! neq 0 (
 for /f "delims=" %%i in ('"%PYTHON_EXE%" --version 2^>^&1') do set PYTHON_VERSION=%%i
 call :log_echo [INFO] Python version: !PYTHON_VERSION!
 
-:: Check if main entry file exists
+REM Check if main entry file exists
 if not exist "%PROJECT_ROOT%%MAIN_FILE%" (
     call :log_echo ""
     call :log_echo ============================================
@@ -215,17 +232,17 @@ if not exist "%PROJECT_ROOT%%MAIN_FILE%" (
 )
 call :log_echo [INFO] Main file found: %MAIN_FILE%
 
-:: Create build directories
+REM Create build directories
 call :log_echo [PREPARE] Creating build directories...
 if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%" >> "%ERROR_LOG%" 2>&1
 if not exist "%TEMP_DIR%" mkdir "%TEMP_DIR%" >> "%ERROR_LOG%" 2>&1
 
-:: Clean previous build files
+REM Clean previous build files
 call :log_echo [CLEANUP] Cleaning previous build files...
 if exist "%BUILD_DIR%\*.exe" del /q "%BUILD_DIR%\*.exe" >> "%ERROR_LOG%" 2>&1
 if exist "%TEMP_DIR%\*" rmdir /s /q "%TEMP_DIR%" 2>> "%ERROR_LOG%" && mkdir "%TEMP_DIR%" >> "%ERROR_LOG%" 2>&1
 
-:: Check and install Nuitka
+REM Check and install Nuitka
 call :log_echo [CHECK] Verifying Nuitka installation...
 "%PYTHON_EXE%" -c "import nuitka" >> "%ERROR_LOG%" 2>&1
 if !errorlevel! neq 0 (
@@ -247,12 +264,15 @@ if !errorlevel! neq 0 (
     call :log_echo [SUCCESS] Nuitka is already installed
 )
 
-:: Windows version detection
+REM Check Nuitka version
+call :check_nuitka_version
+
+REM Windows version detection
 call :log_echo [CHECK] Windows version detection...
 for /f "tokens=4-5 delims=. " %%i in ('ver') do set WIN_VERSION=%%i.%%j
 call :log_echo [INFO] Windows version: !WIN_VERSION!
 
-:: Check and install project dependencies
+REM Check and install project dependencies
 call :log_echo [CHECK] Verifying project dependencies...
 if exist "%PROJECT_ROOT%requirements.txt" (
     call :log_echo [INSTALL] Installing project dependencies...
@@ -266,7 +286,7 @@ if exist "%PROJECT_ROOT%requirements.txt" (
     call :log_echo [INFO] requirements.txt not found, skipping dependency installation
 )
 
-:: Start compilation
+REM Start compilation
 call :log_echo ""
 call :log_echo [Compile] Starting Nuitka compilation...
 call :log_echo [Network] First-time use will auto-download GCC compiler (~378MB)
@@ -276,29 +296,29 @@ call :log_echo ============================================
 
 cd /d "%PROJECT_ROOT%"
 
-:: Check icon file
+REM Check icon file
 set "ICON_PARAM="
 if not "!ICON_FILE!"=="" (
-    :: Convert to absolute path for icon file
+    REM Convert to absolute path for icon file
     set "ICON_FULL_PATH=!PROJECT_ROOT!!ICON_FILE!"
     if exist "!ICON_FULL_PATH!" (
-        :: Use the path directly - batch will handle spaces when variable is expanded
-        :: Nuitka accepts paths with spaces in the parameter value
+        REM Use the path directly - batch will handle spaces when variable is expanded
+        REM Nuitka accepts paths with spaces in the parameter value
         set "ICON_PARAM=--windows-icon-from-ico=!ICON_FULL_PATH!"
-        call :log_echo [INFO] Using icon: !ICON_FILE!
-        call :log_echo [INFO] Icon full path: !ICON_FULL_PATH!
+        echo [INFO] Icon file: !ICON_FILE!
+        echo [INFO] Icon full path: !ICON_FULL_PATH!
     ) else (
-        call :log_echo [WARNING] Icon file not found: !ICON_FILE!, using default icon
-        call :log_echo [WARNING] Expected path: !ICON_FULL_PATH!
+        echo [WARNING] Icon file not found: !ICON_FILE!, default icon will be used
+        echo [WARNING] Expected path: !ICON_FULL_PATH!
     )
 ) else (
-    call :log_echo [INFO] No icon specified, using default icon
+    echo [INFO] No icon specified, default icon will be used
 )
 
 
-:: Set console mode using new Nuitka parameter format
-:: Note: Old parameters --enable-console and --disable-console are deprecated
-:: New parameter options: force, disable, attach
+REM Set console mode using new Nuitka parameter format
+REM Note: Old parameters --enable-console and --disable-console are deprecated
+REM New parameter options: force, disable, attach
 if /i "!SHOW_CONSOLE!"=="true" (
     set CONSOLE_PARAM=--windows-console-mode=force
     call :log_echo [INFO] Console mode: enabled
@@ -308,7 +328,7 @@ if /i "!SHOW_CONSOLE!"=="true" (
 )
 
 
-:: Build include package parameters
+REM Build include package parameters
 set "INCLUDE_PARAM="
 if not "%INCLUDE_PACKAGES%"=="" (
     for %%p in (%INCLUDE_PACKAGES%) do (
@@ -316,10 +336,10 @@ if not "%INCLUDE_PACKAGES%"=="" (
     )
     call :log_echo [INFO] Including packages: %INCLUDE_PACKAGES%
 ) else (
-    call :log_echo [INFO] No additional packages specified, using automatic dependency detection
+    echo [INFO] No additional packages specified, automatic dependency detection enabled
 )
 
-:: Build exclude import parameters
+REM Build exclude import parameters
 set "EXCLUDE_PARAM="
 if not "%EXCLUDE_IMPORTS%"=="" (
     for %%e in (%EXCLUDE_IMPORTS%) do (
@@ -329,11 +349,11 @@ if not "%EXCLUDE_IMPORTS%"=="" (
     call :log_echo [Optimize] Auto-excluding unnecessary dependencies to speed up build...
 )
 
-:: First compilation attempt
+REM First compilation attempt
 call :log_echo [ATTEMPT] Starting intelligent compilation process...
 call :compile_with_nuitka 1
 
-:: Check compilation result
+REM Check compilation result
 set "COMPILE_RESULT=!errorlevel!"
 if !COMPILE_RESULT! equ 0 (
     call :log_echo ""
@@ -341,10 +361,10 @@ if !COMPILE_RESULT! equ 0 (
     call :log_echo [SUCCESS] Compilation completed!
     call :log_echo ============================================
 
-    :: Find and move generated executable
+    REM Find and move generated executable
     call :find_and_move_exe
 
-    :: Clean temp directory immediately exe moved, no longer needed
+    REM Clean temp directory immediately exe moved, no longer needed
     echo.
     echo [CLEANUP] Cleaning build temp directory...
     if exist "%TEMP_DIR%" (
@@ -352,13 +372,13 @@ if !COMPILE_RESULT! equ 0 (
         echo [SUCCESS] Temp directory cleaned
     )
 
-    :: Copy necessary config files
+    REM Copy necessary config files
     call :copy_runtime_files
 
-    :: Display build info
+    REM Display build info
     call :show_build_info
 
-    :: Display elapsed time
+    REM Display elapsed time
     echo.
     call :show_elapsed_time
     echo.
@@ -366,11 +386,11 @@ if !COMPILE_RESULT! equ 0 (
     echo [INFO] Build completed successfully!
     echo ============================================
 
-    :: Clean cache immediately after successful build
+    REM Clean cache immediately after successful build
     echo.
     echo [CLEANUP] Cleaning build cache after successful build...
 
-    :: Clean Nuitka build cache directories in project root
+    REM Clean Nuitka build cache directories in project root
     if exist "%PROJECT_ROOT%.build" (
         echo [Clean] Removing .build directory...
         rmdir /s /q "%PROJECT_ROOT%.build" 2>nul
@@ -386,7 +406,7 @@ if !COMPILE_RESULT! equ 0 (
         rmdir /s /q "%PROJECT_ROOT%.onefile-build" 2>nul
     )
 
-    :: Clean Nuitka build cache directories in build folder (main.build, main.dist, etc.)
+    REM Clean Nuitka build cache directories in build folder (main.build, main.dist, etc.)
     for /d %%d in ("%BUILD_DIR%\*.build") do (
         echo [Clean] Removing Nuitka cache: %%~nxd
         rmdir /s /q "%%d" 2>nul
@@ -402,7 +422,7 @@ if !COMPILE_RESULT! equ 0 (
         rmdir /s /q "%%d" 2>nul
     )
 
-    :: Clean runtime-generated icon files in build directory (these should be embedded in exe)
+    REM Clean runtime-generated icon files in build directory (these should be embedded in exe)
     if exist "%BUILD_DIR%\app_icon.ico" (
         echo [Clean] Removing temp icon: app_icon.ico
         del /q "%BUILD_DIR%\app_icon.ico" 2>nul
@@ -428,13 +448,13 @@ if !COMPILE_RESULT! equ 0 (
         del /q "%BUILD_DIR%\radio_light.png" 2>nul
     )
 
-    :: Clean config directory if empty or contains only generated files
+    REM Clean config directory if empty or contains only generated files
     if exist "%BUILD_DIR%\config" (
         echo [Clean] Removing config directory...
         rmdir /s /q "%BUILD_DIR%\config" 2>nul
     )
 
-    :: 清理 __pycache__ 目录
+    REM Clean __pycache__ directories
     for /d /r "%PROJECT_ROOT%" %%d in (__pycache__) do (
         if exist "%%d" (
             echo [Clean] Removing __pycache__: %%d
@@ -442,21 +462,21 @@ if !COMPILE_RESULT! equ 0 (
         )
     )
 
-    :: 清理 .pyc 文件
+    REM Clean .pyc files
     for /r "%PROJECT_ROOT%" %%f in (*.pyc) do (
         if exist "%%f" (
             del /q "%%f" 2>nul
         )
     )
 
-    :: 清理 .pyo 文件
+    REM Clean .pyo files
     for /r "%PROJECT_ROOT%" %%f in (*.pyo) do (
         if exist "%%f" (
             del /q "%%f" 2>nul
         )
     )
 
-    :: 清理 .pyi 文件
+    REM Clean .pyi files
     for %%f in ("%PROJECT_ROOT%*.pyi") do (
         if exist "%%f" (
             echo [Clean] Removing: %%~nxf
@@ -464,7 +484,7 @@ if !COMPILE_RESULT! equ 0 (
         )
     )
 
-    :: 清理编译报告
+    REM Clean compilation reports
     for %%f in ("%PROJECT_ROOT%compilation_report*.xml") do (
         if exist "%%f" (
             echo [Clean] Removing: %%~nxf
@@ -481,15 +501,15 @@ if !COMPILE_RESULT! equ 0 (
     call :log_echo [FAILED] All compilation attempts failed
     call :log_echo ============================================
 
-    :: 执行失败诊断和指导
+    REM Execute failure diagnosis and guidance
     call :failure_diagnosis_and_guidance
 
-    :: 显示耗时
+    REM Display elapsed time
     echo.
     call :show_elapsed_time
 )
 
-:: 清理临时文件（构建失败时的残留）
+REM Clean temporary files (residuals from failed build)
 if exist "%TEMP_DIR%" (
     call :log_echo ""
     call :log_echo [CLEANUP] Cleaning temporary files...
@@ -503,18 +523,430 @@ call :log_echo Press any key to exit...
 pause >nul
 goto :eof
 
-:: ============================================
-:: 函数定义区域
-:: ============================================
+REM ============================================
+REM Function Definitions
+REM ============================================
 
-:: 查找并移动可执行文件
+REM Detect version info from version.py
+:detect_version_info
+set "VERSION_FILE=!PROJECT_ROOT!version.py"
+
+if not exist "!VERSION_FILE!" (
+    echo [Info] version.py not found, using default values
+    goto :eof
+)
+
+echo [Auto-Detect] Reading version info from version.py...
+
+REM Detect if current environment supports Chinese (check for Windows SDK or Visual Studio)
+set "SUPPORTS_CHINESE=false"
+REM Check Windows SDK
+if exist "%ProgramFiles(x86)%\Windows Kits\10\bin\*" set "SUPPORTS_CHINESE=true"
+if exist "%ProgramFiles%\Windows Kits\10\bin\*" set "SUPPORTS_CHINESE=true"
+REM Check Visual Studio
+if exist "%ProgramFiles(x86)%\Microsoft Visual Studio\*" set "SUPPORTS_CHINESE=true"
+if exist "%ProgramFiles%\Microsoft Visual Studio\*" set "SUPPORTS_CHINESE=true"
+
+if "!SUPPORTS_CHINESE!"=="true" (
+    echo [Auto-Detect] Windows SDK/Visual Studio detected, Chinese version info supported
+) else (
+    echo [Auto-Detect] No Windows SDK/Visual Studio found, using English version info
+)
+
+REM Use PowerShell to parse version.py and write each field to separate temp files
+REM This avoids for /f parsing issues with Chinese characters and special characters
+set "PS_SCRIPT=%TEMP%\parse_version.ps1"
+set "TEMP_VERSION_FILE=%TEMP%\ver_version.txt"
+set "TEMP_COPYRIGHT_FILE=%TEMP%\ver_copyright.txt"
+set "TEMP_APPNAME_FILE=%TEMP%\ver_appname.txt"
+set "TEMP_APPNAME_EN_FILE=%TEMP%\ver_appname_en.txt"
+set "TEMP_DESC_FILE=%TEMP%\ver_desc.txt"
+set "TEMP_DESC_EN_FILE=%TEMP%\ver_desc_en.txt"
+
+REM Create PowerShell script to parse version.py and write to temp files
+> "!PS_SCRIPT!" echo $content = Get-Content -Path '!VERSION_FILE!' -Raw -Encoding UTF8
+>> "!PS_SCRIPT!" echo $version = ''
+>> "!PS_SCRIPT!" echo $copyright = ''
+>> "!PS_SCRIPT!" echo $app_name = ''
+>> "!PS_SCRIPT!" echo $app_name_en = ''
+>> "!PS_SCRIPT!" echo $description = ''
+>> "!PS_SCRIPT!" echo $description_en = ''
+>> "!PS_SCRIPT!" echo.
+>> "!PS_SCRIPT!" echo # Extract __version__
+>> "!PS_SCRIPT!" echo if ($content -match '__version__\s*=\s*[''"]([^''"]+)[''"]') { $version = $matches[1] }
+>> "!PS_SCRIPT!" echo # Extract AUTHOR first (needed for COPYRIGHT)
+>> "!PS_SCRIPT!" echo $author = ''
+>> "!PS_SCRIPT!" echo if ($content -match 'AUTHOR\s*=\s*[''"]([^''"]+)[''"]') { $author = $matches[1] }
+>> "!PS_SCRIPT!" echo # Extract COPYRIGHT - check if it's an f-string with AUTHOR
+>> "!PS_SCRIPT!" echo if ($content -match 'COPYRIGHT\s*=\s*f[''"]') {
+>> "!PS_SCRIPT!" echo     $year = (Get-Date).Year
+>> "!PS_SCRIPT!" echo     if ($author -ne '') { $copyright = "Copyright (c) $year $author" }
+>> "!PS_SCRIPT!" echo } elseif ($content -match 'COPYRIGHT\s*=\s*[''"]([^''"]+)[''"]') {
+>> "!PS_SCRIPT!" echo     $copyright = $matches[1]
+>> "!PS_SCRIPT!" echo }
+>> "!PS_SCRIPT!" echo # Extract APP_NAME (Chinese name)
+>> "!PS_SCRIPT!" echo if ($content -match '(?m)^APP_NAME\s*=\s*[''"]([^''"]+)[''"]') { $app_name = $matches[1] }
+>> "!PS_SCRIPT!" echo # Extract APP_NAME_EN (English name)
+>> "!PS_SCRIPT!" echo if ($content -match 'APP_NAME_EN\s*=\s*[''"]([^''"]+)[''"]') { $app_name_en = $matches[1] }
+>> "!PS_SCRIPT!" echo # Extract DESCRIPTION (Chinese) - match any characters including Chinese
+>> "!PS_SCRIPT!" echo if ($content -match '(?m)^DESCRIPTION\s*=\s*[''"](.+?)[''"]') { $description = $matches[1] }
+>> "!PS_SCRIPT!" echo # Extract DESCRIPTION_EN (English)
+>> "!PS_SCRIPT!" echo if ($content -match '(?m)^DESCRIPTION_EN\s*=\s*[''"](.+?)[''"]') { $description_en = $matches[1] }
+>> "!PS_SCRIPT!" echo.
+>> "!PS_SCRIPT!" echo # Write each field to separate temp files (UTF-8 without BOM for batch compatibility)
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_VERSION_FILE!', $version, [System.Text.UTF8Encoding]::new($false))
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_COPYRIGHT_FILE!', $copyright, [System.Text.UTF8Encoding]::new($false))
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_APPNAME_FILE!', $app_name, [System.Text.UTF8Encoding]::new($false))
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_APPNAME_EN_FILE!', $app_name_en, [System.Text.UTF8Encoding]::new($false))
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_DESC_FILE!', $description, [System.Text.UTF8Encoding]::new($false))
+>> "!PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!TEMP_DESC_EN_FILE!', $description_en, [System.Text.UTF8Encoding]::new($false))
+
+REM Execute PowerShell script
+echo [DEBUG] Executing PowerShell script: !PS_SCRIPT!
+echo [DEBUG] VERSION_FILE: !VERSION_FILE!
+powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_SCRIPT!"
+
+REM Read version from temp file (version is pure ASCII, safe to read)
+echo [DEBUG] Checking temp file: !TEMP_VERSION_FILE!
+if exist "!TEMP_VERSION_FILE!" (
+    set /p PROJECT_VERSION=<"!TEMP_VERSION_FILE!"
+    echo [DEBUG] Read PROJECT_VERSION: !PROJECT_VERSION!
+) else (
+    echo [DEBUG] Temp version file NOT found
+)
+REM Read copyright from temp file
+if exist "!TEMP_COPYRIGHT_FILE!" (
+    set /p PROJECT_COPYRIGHT=<"!TEMP_COPYRIGHT_FILE!"
+)
+REM Read app names from temp files
+if exist "!TEMP_APPNAME_FILE!" (
+    set /p DETECTED_APP_NAME=<"!TEMP_APPNAME_FILE!"
+)
+if exist "!TEMP_APPNAME_EN_FILE!" (
+    set /p DETECTED_APP_NAME_EN=<"!TEMP_APPNAME_EN_FILE!"
+)
+REM Read descriptions from temp files using PowerShell to handle UTF-8 encoding
+set "DETECTED_DESCRIPTION="
+set "DETECTED_DESCRIPTION_EN="
+if exist "!TEMP_DESC_FILE!" (
+    set "PS_READ_DESC=%TEMP%\read_desc_%RANDOM%.ps1"
+    > "!PS_READ_DESC!" echo $ErrorActionPreference = 'Stop'
+    >> "!PS_READ_DESC!" echo try {
+    >> "!PS_READ_DESC!" echo     $content = [System.IO.File]::ReadAllText('!TEMP_DESC_FILE!', [System.Text.Encoding]::UTF8)
+    >> "!PS_READ_DESC!" echo     $content = $content.Trim()
+    >> "!PS_READ_DESC!" echo     if ($content -ne '') { Write-Output $content }
+    >> "!PS_READ_DESC!" echo } catch {
+    >> "!PS_READ_DESC!" echo     Write-Output ''
+    >> "!PS_READ_DESC!" echo }
+    for /f "delims=" %%a in ('powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_READ_DESC!" 2^>nul') do (
+        set "DETECTED_DESCRIPTION=%%a"
+    )
+    del "!PS_READ_DESC!" >nul 2>&1
+    if defined DETECTED_DESCRIPTION (
+        echo [DEBUG] Read DETECTED_DESCRIPTION from file: !DETECTED_DESCRIPTION!
+    ) else (
+        echo [DEBUG] DETECTED_DESCRIPTION is empty after reading from file
+    )
+)
+if "!DETECTED_DESCRIPTION!"=="" if exist "!TEMP_DESC_FILE!" (
+    for /f "usebackq delims=" %%a in ("!TEMP_DESC_FILE!") do set "DETECTED_DESCRIPTION=%%a"
+    if not "!DETECTED_DESCRIPTION!"=="" (
+        echo [DEBUG] Fallback DETECTED_DESCRIPTION from file: !DETECTED_DESCRIPTION!
+    ) else (
+        echo [DEBUG] Fallback DETECTED_DESCRIPTION still empty
+    )
+)
+if exist "!TEMP_DESC_EN_FILE!" (
+    set "PS_READ_DESC_EN=%TEMP%\read_desc_en_%RANDOM%.ps1"
+    > "!PS_READ_DESC_EN!" echo $ErrorActionPreference = 'Stop'
+    >> "!PS_READ_DESC_EN!" echo try {
+    >> "!PS_READ_DESC_EN!" echo     $content = [System.IO.File]::ReadAllText('!TEMP_DESC_EN_FILE!', [System.Text.Encoding]::UTF8)
+    >> "!PS_READ_DESC_EN!" echo     $content = $content.Trim()
+    >> "!PS_READ_DESC_EN!" echo     if ($content -ne '') { Write-Output $content }
+    >> "!PS_READ_DESC_EN!" echo } catch {
+    >> "!PS_READ_DESC_EN!" echo     Write-Output ''
+    >> "!PS_READ_DESC_EN!" echo }
+    for /f "delims=" %%a in ('powershell -NoProfile -ExecutionPolicy Bypass -File "!PS_READ_DESC_EN!" 2^>nul') do (
+        set "DETECTED_DESCRIPTION_EN=%%a"
+    )
+    del "!PS_READ_DESC_EN!" >nul 2>&1
+    if defined DETECTED_DESCRIPTION_EN (
+        echo [DEBUG] Read DETECTED_DESCRIPTION_EN from file: !DETECTED_DESCRIPTION_EN!
+    )
+)
+
+REM Clean up temp files (disabled for debugging)
+REM del "!TEMP_VERSION_FILE!" >nul 2>&1
+REM del "!TEMP_COPYRIGHT_FILE!" >nul 2>&1
+REM del "!TEMP_APPNAME_FILE!" >nul 2>&1
+REM del "!TEMP_APPNAME_EN_FILE!" >nul 2>&1
+REM del "!TEMP_DESC_FILE!" >nul 2>&1
+REM del "!TEMP_DESC_EN_FILE!" >nul 2>&1
+
+REM Clean temporary script (disabled for debugging)
+REM if exist "!PS_SCRIPT!" del "!PS_SCRIPT!" >nul 2>&1
+echo [DEBUG] Temp files preserved for inspection
+echo [DEBUG] About to check SUPPORTS_CHINESE
+
+REM Select Chinese or English based on environment support
+echo [DEBUG] SUPPORTS_CHINESE=!SUPPORTS_CHINESE!
+
+if "!SUPPORTS_CHINESE!"=="true" goto :process_chinese_info
+goto :process_english_info
+
+:process_chinese_info
+echo [DEBUG] Inside SUPPORTS_CHINESE==true block
+REM Prefer Chinese
+if defined DETECTED_APP_NAME (
+    set "PROJECT_NAME=!DETECTED_APP_NAME!"
+    set "PROJECT_DISPLAY_NAME=!DETECTED_APP_NAME!"
+) else (
+    if defined DETECTED_APP_NAME_EN (
+        set "PROJECT_NAME=!DETECTED_APP_NAME_EN!"
+        set "PROJECT_DISPLAY_NAME=!DETECTED_APP_NAME_EN!"
+    )
+)
+
+REM For description, always prefer Chinese if it exists
+if not "!DETECTED_DESCRIPTION!"=="" (
+    set "PROJECT_DESCRIPTION=!DETECTED_DESCRIPTION!"
+    echo [DEBUG] Using Chinese description: !PROJECT_DESCRIPTION!
+) else (
+    if not "!DETECTED_DESCRIPTION_EN!"=="" (
+        set "PROJECT_DESCRIPTION=!DETECTED_DESCRIPTION_EN!"
+        echo [DEBUG] Using English description - Chinese not found: !PROJECT_DESCRIPTION!
+    )
+)
+goto :after_process_language
+
+:process_english_info
+REM Use English only (but prefer Chinese description if available)
+if defined DETECTED_APP_NAME_EN (
+    set "PROJECT_NAME=!DETECTED_APP_NAME_EN!"
+    set "PROJECT_DISPLAY_NAME=!DETECTED_APP_NAME_EN!"
+)
+if not "!DETECTED_DESCRIPTION!"=="" (
+    set "PROJECT_DESCRIPTION=!DETECTED_DESCRIPTION!"
+) else if not "!DETECTED_DESCRIPTION_EN!"=="" (
+    set "PROJECT_DESCRIPTION=!DETECTED_DESCRIPTION_EN!"
+)
+goto :after_process_language
+
+:after_process_language
+
+REM Output detection results
+echo [DEBUG] Before output detection results
+echo [Auto-Detect] Version: !PROJECT_VERSION!
+echo [DEBUG] After Version output
+echo [Auto-Detect] Copyright: "!PROJECT_COPYRIGHT!"
+echo [DEBUG] After Copyright output
+echo [Auto-Detect] Product Name: "!PROJECT_NAME!"
+echo [DEBUG] After Product Name output
+echo [Auto-Detect] Description: "!PROJECT_DESCRIPTION!"
+echo [DEBUG] After Description output
+echo [DEBUG] DETECTED_APP_NAME: "!DETECTED_APP_NAME!"
+echo [DEBUG] DETECTED_APP_NAME_EN: "!DETECTED_APP_NAME_EN!"
+echo [DEBUG] About to return from detect_version_info
+echo.
+
+goto :eof
+
+REM Check Nuitka version
+REM Returns: NUITKA_VERSION_MAJOR, NUITKA_VERSION_MINOR, NUITKA_SUPPORTS_RC_FILE (true/false)
+:check_nuitka_version
+set "NUITKA_VERSION_MAJOR=0"
+set "NUITKA_VERSION_MINOR=0"
+set "NUITKA_SUPPORTS_RC_FILE=false"
+
+REM Get Nuitka version using Python
+set "VERSION_CHECK_SCRIPT=%TEMP%\check_nuitka_version_%RANDOM%.py"
+> "!VERSION_CHECK_SCRIPT!" echo import nuitka
+>> "!VERSION_CHECK_SCRIPT!" echo try:
+>> "!VERSION_CHECK_SCRIPT!" echo     version = nuitka.__version__
+>> "!VERSION_CHECK_SCRIPT!" echo     parts = version.split('.')
+>> "!VERSION_CHECK_SCRIPT!" echo     major = int(parts[0]) if len(parts) ^> 0 else 0
+>> "!VERSION_CHECK_SCRIPT!" echo     minor = int(parts[1]) if len(parts) ^> 1 else 0
+>> "!VERSION_CHECK_SCRIPT!" echo     print(f"{major}.{minor}")
+>> "!VERSION_CHECK_SCRIPT!" echo except:
+>> "!VERSION_CHECK_SCRIPT!" echo     print("0.0")
+
+for /f "tokens=1-2 delims=." %%a in ('"%PYTHON_EXE%" "!VERSION_CHECK_SCRIPT!" 2^>nul') do (
+    set "NUITKA_VERSION_MAJOR=%%a"
+    set "NUITKA_VERSION_MINOR=%%b"
+)
+
+del "!VERSION_CHECK_SCRIPT!" >nul 2>&1
+
+REM Note: Nuitka 2.8.9 (latest) does not support --windows-force-rc-file
+REM Resource files can be created for Chinese version info, but Nuitka cannot use them directly
+REM We will use command line parameters instead and ensure icon is always added separately
+set "NUITKA_SUPPORTS_RC_FILE=false"
+
+call :log_echo [INFO] Nuitka version: !NUITKA_VERSION_MAJOR!.!NUITKA_VERSION_MINOR!
+call :log_echo [INFO] Note: Nuitka 2.8.9 does not support --windows-force-rc-file, will use command line parameters
+
+goto :eof
+
+REM Create Windows resource file for Chinese version info
+REM Returns: RC_FILE_PATH (global variable) - path to compiled .res file, empty if failed
+:create_version_resource_file
+set "RC_FILE_PATH="
+set "RC_SOURCE=!TEMP_DIR!\version_info.rc"
+set "RES_FILE=!TEMP_DIR!\version_info.res"
+
+REM Find rc.exe from Windows SDK
+set "RC_EXE="
+REM Check PATH first
+where rc.exe >nul 2>&1
+if !errorlevel! equ 0 (
+    for /f "delims=" %%p in ('where rc.exe 2^>nul') do (
+        set "RC_EXE=%%p"
+        goto :found_rc
+    )
+)
+REM Search Windows SDK
+for /d %%d in ("%ProgramFiles(x86)%\Windows Kits\10\bin\10.*") do (
+    if exist "%%d\x64\rc.exe" (
+        set "RC_EXE=%%d\x64\rc.exe"
+        goto :found_rc
+    )
+)
+for /d %%d in ("%ProgramFiles%\Windows Kits\10\bin\10.*") do (
+    if exist "%%d\x64\rc.exe" (
+        set "RC_EXE=%%d\x64\rc.exe"
+        goto :found_rc
+    )
+)
+:found_rc
+
+if not defined RC_EXE (
+    call :log_echo [WARNING] rc.exe not found, cannot compile resource file
+    goto :eof
+)
+call :log_echo [INFO] Found resource compiler: !RC_EXE!
+
+REM Parse version to 4-part format for resource file
+set "VER_PART1=0"
+set "VER_PART2=0"
+set "VER_PART3=0"
+set "VER_PART4=0"
+for /f "tokens=1-4 delims=." %%a in ("!WIN_VERSION!") do (
+    if not "%%a"=="" set "VER_PART1=%%a"
+    if not "%%b"=="" set "VER_PART2=%%b"
+    if not "%%c"=="" set "VER_PART3=%%c"
+    if not "%%d"=="" set "VER_PART4=%%d"
+)
+
+REM Create .rc file with UTF-8 BOM for Chinese support
+REM Use PowerShell to write UTF-8 with BOM
+set "RC_PS_SCRIPT=!TEMP_DIR!\create_rc.ps1"
+
+REM Build the RC content - note: OriginalFilename is intentionally omitted
+REM Do NOT include windows.h - define constants manually to avoid dependency
+> "!RC_PS_SCRIPT!" echo $rcContent = @"
+>> "!RC_PS_SCRIPT!" echo // Version info resource - Generated by build_universal.bat
+>> "!RC_PS_SCRIPT!" echo // Supports Chinese characters
+>> "!RC_PS_SCRIPT!" echo // Self-contained - does not require windows.h
+>> "!RC_PS_SCRIPT!" echo.
+>> "!RC_PS_SCRIPT!" echo // Define constants manually (from winver.h)
+>> "!RC_PS_SCRIPT!" echo #ifndef VS_VERSION_INFO
+>> "!RC_PS_SCRIPT!" echo #define VS_VERSION_INFO 1
+>> "!RC_PS_SCRIPT!" echo #endif
+>> "!RC_PS_SCRIPT!" echo #define VOS_NT_WINDOWS32 0x00040004L
+>> "!RC_PS_SCRIPT!" echo #define VFT_APP 0x00000001L
+>> "!RC_PS_SCRIPT!" echo.
+>> "!RC_PS_SCRIPT!" echo // Include icon if available
+if defined ICON_FULL_PATH (
+    if exist "!ICON_FULL_PATH!" (
+        REM Escape backslashes in icon path for RC file
+        set "ICON_PATH_ESCAPED=!ICON_FULL_PATH:\=\\!"
+        >> "!RC_PS_SCRIPT!" echo IDI_ICON1 ICON "!ICON_PATH_ESCAPED!"
+        >> "!RC_PS_SCRIPT!" echo.
+        call :log_echo [INFO] Icon will be included in resource file: !ICON_FILE!
+    )
+)
+>> "!RC_PS_SCRIPT!" echo VS_VERSION_INFO VERSIONINFO
+>> "!RC_PS_SCRIPT!" echo  FILEVERSION !VER_PART1!,!VER_PART2!,!VER_PART3!,!VER_PART4!
+>> "!RC_PS_SCRIPT!" echo  PRODUCTVERSION !VER_PART1!,!VER_PART2!,!VER_PART3!,!VER_PART4!
+>> "!RC_PS_SCRIPT!" echo  FILEFLAGSMASK 0x3fL
+>> "!RC_PS_SCRIPT!" echo #ifdef _DEBUG
+>> "!RC_PS_SCRIPT!" echo  FILEFLAGS 0x1L
+>> "!RC_PS_SCRIPT!" echo #else
+>> "!RC_PS_SCRIPT!" echo  FILEFLAGS 0x0L
+>> "!RC_PS_SCRIPT!" echo #endif
+>> "!RC_PS_SCRIPT!" echo  FILEOS VOS_NT_WINDOWS32
+>> "!RC_PS_SCRIPT!" echo  FILETYPE VFT_APP
+>> "!RC_PS_SCRIPT!" echo  FILESUBTYPE 0x0L
+>> "!RC_PS_SCRIPT!" echo BEGIN
+>> "!RC_PS_SCRIPT!" echo     BLOCK "StringFileInfo"
+>> "!RC_PS_SCRIPT!" echo     BEGIN
+>> "!RC_PS_SCRIPT!" echo         BLOCK "080404b0"
+>> "!RC_PS_SCRIPT!" echo         BEGIN
+>> "!RC_PS_SCRIPT!" echo             VALUE "CompanyName", "!COMPANY_NAME!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "FileDescription", "!FILE_DESC_VALUE!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "FileVersion", "!WIN_VERSION!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "InternalName", "!OUTPUT_EXE_NAME!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "LegalCopyright", "!PROJECT_COPYRIGHT!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "ProductName", "!PRODUCT_NAME_VALUE!"
+>> "!RC_PS_SCRIPT!" echo             VALUE "ProductVersion", "!WIN_VERSION!"
+>> "!RC_PS_SCRIPT!" echo         END
+>> "!RC_PS_SCRIPT!" echo     END
+>> "!RC_PS_SCRIPT!" echo     BLOCK "VarFileInfo"
+>> "!RC_PS_SCRIPT!" echo     BEGIN
+>> "!RC_PS_SCRIPT!" echo         VALUE "Translation", 0x804, 1200
+>> "!RC_PS_SCRIPT!" echo     END
+>> "!RC_PS_SCRIPT!" echo END
+>> "!RC_PS_SCRIPT!" echo "@
+>> "!RC_PS_SCRIPT!" echo.
+>> "!RC_PS_SCRIPT!" echo # Write RC file with UTF-8 BOM
+>> "!RC_PS_SCRIPT!" echo [System.IO.File]::WriteAllText('!RC_SOURCE!', $rcContent, [System.Text.UTF8Encoding]::new($true))
+
+REM Execute PowerShell to create RC file
+powershell -NoProfile -ExecutionPolicy Bypass -File "!RC_PS_SCRIPT!" >nul 2>&1
+
+if not exist "!RC_SOURCE!" (
+    call :log_echo [WARNING] Failed to create RC source file
+    del "!RC_PS_SCRIPT!" >nul 2>&1
+    goto :eof
+)
+
+call :log_echo [INFO] Created resource source file: !RC_SOURCE!
+
+REM Compile RC to RES (no include paths needed - self-contained)
+echo [DEBUG-RC] Compiling with command: "!RC_EXE!" /fo "!RES_FILE!" /nologo "!RC_SOURCE!"
+"!RC_EXE!" /fo "!RES_FILE!" /nologo "!RC_SOURCE!" 2>&1
+set "RC_COMPILE_ERROR=!errorlevel!"
+echo [DEBUG-RC] RC.EXE exit code: !RC_COMPILE_ERROR!
+if !RC_COMPILE_ERROR! neq 0 (
+    call :log_echo [ERROR] Failed to compile resource file, error code: !RC_COMPILE_ERROR!
+    call :log_echo [ERROR] Resource compilation failed even without windows.h dependency
+    call :log_echo [ERROR] Please check if rc.exe is working correctly
+    del "!RC_PS_SCRIPT!" >nul 2>&1
+    goto :eof
+)
+
+if exist "!RES_FILE!" (
+    set "RC_FILE_PATH=!RES_FILE!"
+    call :log_echo [INFO] Compiled resource file: !RES_FILE!
+    echo [DEBUG-RC] Resource file successfully created
+) else (
+    call :log_echo [WARNING] Resource file not created despite success exit code
+    echo [DEBUG-RC] RES file not found at: !RES_FILE!
+)
+
+REM Clean up
+del "!RC_PS_SCRIPT!" >nul 2>&1
+
+goto :eof
+
+REM Find and move executable file
 :find_and_move_exe
 echo [SEARCH] Looking for generated executable files...
 
 set "EXE_FOUND=0"
 set "MAIN_FILE_BASE=%MAIN_FILE:.py=%"
 
-:: 1. 检查项目根目录
+REM 1. Check project root directory
 if exist "%PROJECT_ROOT%%MAIN_FILE_BASE%.exe" (
     move "%PROJECT_ROOT%%MAIN_FILE_BASE%.exe" "%DIST_DIR%\%OUTPUT_EXE_NAME%.exe"
     echo [SUCCESS] Executable moved: %DIST_DIR%\%OUTPUT_EXE_NAME%.exe
@@ -522,7 +954,7 @@ if exist "%PROJECT_ROOT%%MAIN_FILE_BASE%.exe" (
     goto :eof
 )
 
-:: 2. 检查temp目录
+REM 2. Check temp directory
 if exist "%TEMP_DIR%\%MAIN_FILE_BASE%.exe" (
     move "%TEMP_DIR%\%MAIN_FILE_BASE%.exe" "%DIST_DIR%\%OUTPUT_EXE_NAME%.exe"
     echo [SUCCESS] Executable moved: %DIST_DIR%\%OUTPUT_EXE_NAME%.exe
@@ -530,7 +962,7 @@ if exist "%TEMP_DIR%\%MAIN_FILE_BASE%.exe" (
     goto :eof
 )
 
-:: 3. 搜索所有可能的exe文件
+REM 3. Search all possible exe files
 for %%f in ("%PROJECT_ROOT%*.exe") do (
     if /i not "%%~nxf"=="build_universal.bat" (
         move "%%f" "%DIST_DIR%\%OUTPUT_EXE_NAME%.exe"
@@ -547,17 +979,17 @@ if !EXE_FOUND! equ 0 (
 
 goto :eof
 
-:: 复制运行时文件
+REM Copy runtime files
 :copy_runtime_files
 echo [DEPLOY] Copying runtime files...
 
-:: 不再复制配置文件和图标，让程序在运行时自动生成config.json
-:: 图标已经集成到exe文件中，无需单独复制
+REM No longer copy config files and icons, let the program auto-generate config.json at runtime
+REM Icons are already embedded in exe file, no need to copy separately
 
 echo [INFO] Runtime files copy completed (minimal deployment)
 goto :eof
 
-:: 显示构建信息
+REM Display build information
 :show_build_info
 echo.
 echo ============================================
@@ -584,7 +1016,7 @@ echo Build tool: Nuitka
 echo.
 goto :eof
 
-:: 增强的网络连接检查
+REM Enhanced network connection check
 :check_network_advanced
 echo [Network] Testing basic connection...
 ping -n 1 -w 3000 8.8.8.8 >nul 2>&1
@@ -609,57 +1041,57 @@ if !errorlevel! neq 0 (
 echo.
 goto :eof
 
-:: 使用智能镜像源安装 Nuitka
+REM Install Nuitka with smart mirror selection
 :install_nuitka_with_mirror
 echo [Info] Detecting fastest pip mirror source...
 set "PIP_MIRROR="
-set "MIRROR_NAME=PyPI 官方源"
+set "MIRROR_NAME=PyPI Official"
 set "BEST_TIME=9999"
 
-:: 测试 PyPI 官方源
-echo Testing: PyPI 官方源...
+REM Test PyPI official source
+echo Testing: PyPI Official...
 powershell -Command "$ProgressPreference='SilentlyContinue'; $sw=[System.Diagnostics.Stopwatch]::StartNew(); try { $null=Invoke-WebRequest -Uri 'https://pypi.org' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop; $sw.Stop(); Write-Host $sw.ElapsedMilliseconds } catch { Write-Host 9999 }" > "%TEMP%\mirror_test.txt" 2>&1
 set /p PYPI_TIME=<"%TEMP%\mirror_test.txt"
 if !PYPI_TIME! lss !BEST_TIME! (
     set "BEST_TIME=!PYPI_TIME!"
-    set "MIRROR_NAME=PyPI 官方源"
+    set "MIRROR_NAME=PyPI Official"
     set "PIP_MIRROR=-i https://pypi.org/simple"
 )
 
-:: 测试清华源
-echo Testing: 清华大学镜像源...
+REM Test Tsinghua mirror
+echo Testing: Tsinghua University Mirror...
 powershell -Command "$ProgressPreference='SilentlyContinue'; $sw=[System.Diagnostics.Stopwatch]::StartNew(); try { $null=Invoke-WebRequest -Uri 'https://pypi.tuna.tsinghua.edu.cn' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop; $sw.Stop(); Write-Host $sw.ElapsedMilliseconds } catch { Write-Host 9999 }" > "%TEMP%\mirror_test.txt" 2>&1
 set /p TSINGHUA_TIME=<"%TEMP%\mirror_test.txt"
 if !TSINGHUA_TIME! lss !BEST_TIME! (
     set "BEST_TIME=!TSINGHUA_TIME!"
-    set "MIRROR_NAME=清华大学镜像源"
+    set "MIRROR_NAME=Tsinghua University Mirror"
     set "PIP_MIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple"
 )
 
-:: 测试阿里云源
-echo Testing: 阿里云镜像源...
+REM Test Aliyun mirror
+echo Testing: Aliyun Mirror...
 powershell -Command "$ProgressPreference='SilentlyContinue'; $sw=[System.Diagnostics.Stopwatch]::StartNew(); try { $null=Invoke-WebRequest -Uri 'https://mirrors.aliyun.com' -TimeoutSec 2 -UseBasicParsing -ErrorAction Stop; $sw.Stop(); Write-Host $sw.ElapsedMilliseconds } catch { Write-Host 9999 }" > "%TEMP%\mirror_test.txt" 2>&1
 set /p ALIYUN_TIME=<"%TEMP%\mirror_test.txt"
 if !ALIYUN_TIME! lss !BEST_TIME! (
     set "BEST_TIME=!ALIYUN_TIME!"
-    set "MIRROR_NAME=阿里云镜像源"
+    set "MIRROR_NAME=Aliyun Mirror"
     set "PIP_MIRROR=-i https://mirrors.aliyun.com/pypi/simple/"
 )
 
-:: 清理临时文件
+REM Clean temporary files
 if exist "%TEMP%\mirror_test.txt" del "%TEMP%\mirror_test.txt"
 
-:: 显示结果
+REM Display results
 if !BEST_TIME! lss 9999 (
     echo [Success] Selected fastest mirror: !MIRROR_NAME! ^(!BEST_TIME!ms^)
 ) else (
     echo [Info] All mirrors timed out, using default PyPI
-    set "MIRROR_NAME=PyPI 官方源 (备用)"
+    set "MIRROR_NAME=PyPI Official (Fallback)"
     set "PIP_MIRROR=-i https://pypi.org/simple"
 )
 echo.
 
-:: 升级 pip
+REM Upgrade pip
 echo [Info] Upgrading pip...
 "%PYTHON_EXE%" -m pip install --upgrade pip %PIP_MIRROR% >nul 2>&1
 if !errorlevel! equ 0 (
@@ -669,7 +1101,7 @@ if !errorlevel! equ 0 (
 )
 echo.
 
-:: 安装 Nuitka
+REM Install Nuitka
 echo [Info] Installing Nuitka...
 "%PYTHON_EXE%" -m pip install nuitka %PIP_MIRROR%
 set "INSTALL_RESULT=!errorlevel!"
@@ -683,17 +1115,17 @@ if !INSTALL_RESULT! neq 0 (
 
 exit /b !INSTALL_RESULT!
 
-:: 检测系统架构并获取最新GCC版本
+REM Detect system architecture and get latest GCC version
 :detect_system_arch_and_get_gcc
 
-:: 检测系统架构
+REM Detect system architecture
 set "SYSTEM_ARCH=x86_64"
 if "%PROCESSOR_ARCHITECTURE%"=="x86" (
     set "SYSTEM_ARCH=i686"
 ) else if "%PROCESSOR_ARCHITECTURE%"=="AMD64" (
     set "SYSTEM_ARCH=x86_64"
 ) else (
-    :: 使用 PowerShell 检测
+    REM Use PowerShell to detect
     for /f "delims=" %%a in ('powershell -Command "[System.Environment]::Is64BitOperatingSystem"') do set "IS_64BIT=%%a"
     if "!IS_64BIT!"=="True" (
         set "SYSTEM_ARCH=x86_64"
@@ -702,7 +1134,7 @@ if "%PROCESSOR_ARCHITECTURE%"=="x86" (
     )
 )
 
-:: 根据架构设置 GCC 文件名模式
+REM Set GCC filename pattern based on architecture
 if "!SYSTEM_ARCH!"=="i686" (
     set "GCC_PATTERN=winlibs-i686-posix-dwarf-gcc-"
 ) else (
@@ -715,25 +1147,25 @@ echo [GCC Manager] Checking GCC Compiler Cache
 echo ============================================
 echo.
 
-:: 创建下载目录
+REM Create download directory
 if not exist "%GCC_DOWNLOAD_DIR%" (
     mkdir "%GCC_DOWNLOAD_DIR%" 2>nul
 )
 
-:: 先检查本地是否已有匹配架构的 GCC 文件
+REM First check if local GCC file matching architecture already exists
 echo [Checking] Searching for existing GCC compiler...
 set "LOCAL_GCC_FOUND=0"
 set "LOCAL_GCC_ZIP="
 set "LOCAL_GCC_EXTRACT_DIR="
 
-:: 搜索本地匹配架构的 GCC zip 文件
+REM Search for local GCC zip file matching architecture
 for %%f in ("%GCC_DOWNLOAD_DIR%\winlibs-!SYSTEM_ARCH!-posix-*.zip") do (
     if exist "%%f" (
         set "LOCAL_GCC_ZIP=%%~nxf"
         set "LOCAL_GCC_ZIP_PATH=%%f"
 
-        :: winlibs 的 zip 包解压后直接是 mingw64 目录（64位）或 mingw32 目录（32位）
-        :: 所以我们直接检查这些目录是否存在
+        REM winlibs zip package extracts directly to mingw64 directory (64-bit) or mingw32 directory (32-bit)
+        REM So we directly check if these directories exist
         if exist "%GCC_DOWNLOAD_DIR%\mingw64\bin\gcc.exe" (
             set "LOCAL_GCC_FOUND=1"
             set "LOCAL_GCC_EXTRACT_DIR=%GCC_DOWNLOAD_DIR%"
@@ -747,7 +1179,7 @@ for %%f in ("%GCC_DOWNLOAD_DIR%\winlibs-!SYSTEM_ARCH!-posix-*.zip") do (
             echo [Found] Extracted directory: %GCC_DOWNLOAD_DIR%\mingw32
             goto :local_gcc_ready
         ) else (
-            :: 有 zip 文件但未解压，标记为找到但需要解压
+            REM Zip file exists but not extracted, mark as found but needs extraction
             set "LOCAL_GCC_FOUND=2"
             echo [Found] Local GCC zip found but not extracted: !LOCAL_GCC_ZIP!
             goto :local_gcc_ready
@@ -757,7 +1189,7 @@ for %%f in ("%GCC_DOWNLOAD_DIR%\winlibs-!SYSTEM_ARCH!-posix-*.zip") do (
 
 :local_gcc_ready
 if !LOCAL_GCC_FOUND! equ 1 (
-    :: 本地已有可用的 GCC，直接使用
+    REM Local GCC already available, use directly
     echo [Found] Using existing local GCC compiler
     set "GCC_ZIP=!LOCAL_GCC_ZIP!"
     set "GCC_ZIP_PATH=!LOCAL_GCC_ZIP_PATH!"
@@ -767,7 +1199,7 @@ if !LOCAL_GCC_FOUND! equ 1 (
     echo.
     goto :eof
 ) else if !LOCAL_GCC_FOUND! equ 2 (
-    :: 本地有 zip 文件但未解压，直接解压使用
+    REM Local zip file exists but not extracted, extract and use
     echo [Found] Local GCC archive found, extracting...
     call :extract_gcc "!LOCAL_GCC_ZIP_PATH!" "%GCC_DOWNLOAD_DIR%"
     if !errorlevel! equ 0 (
@@ -784,7 +1216,7 @@ if !LOCAL_GCC_FOUND! equ 1 (
     )
 )
 
-:: 本地没有可用的 GCC，从 GitHub 获取最新版本
+REM No local GCC available, get latest version from GitHub
 echo [Not Found] No local GCC compiler found for architecture: !SYSTEM_ARCH!
 echo [Fetching] Getting latest GCC version from GitHub...
 set "PS_SCRIPT=%TEMP%\get_gcc_latest.ps1"
@@ -818,12 +1250,12 @@ set "GCC_FETCH_RESULT=!errorlevel!"
 
 if !GCC_FETCH_RESULT! neq 0 (
     echo [Warning] Failed to fetch latest version from GitHub, using fallback...
-    :: 使用默认版本作为后备
+    REM Use default version as fallback
     set "GCC_ZIP=winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r5.zip"
     set "GCC_URL=https://github.com/brechtsanders/winlibs_mingw/releases/download/15.2.0posix-13.0.0-msvcrt-r5/%GCC_ZIP%"
     set "GCC_VERSION=15.2.0posix-13.0.0-msvcrt-r5"
 ) else (
-    :: 读取 GitHub API 返回的信息
+    REM Read GitHub API response information
     set "LINE_NUM=0"
     for /f "delims=" %%a in ('type "%TEMP%\gcc_info.txt"') do (
         set /a "LINE_NUM+=1"
@@ -833,19 +1265,19 @@ if !GCC_FETCH_RESULT! neq 0 (
     )
 )
 
-:: 清理临时文件
+REM Clean temporary files
 del "%PS_SCRIPT%" >nul 2>&1
 del "%TEMP%\gcc_info.txt" >nul 2>&1
 
 echo [Latest] GCC Version: !GCC_VERSION!
 echo [File] !GCC_ZIP!
 
-:: 检查本地是否已有该文件
+REM Check if local file already exists
 set "GCC_ZIP_PATH=%GCC_DOWNLOAD_DIR%\!GCC_ZIP!"
 if exist "!GCC_ZIP_PATH!" (
     echo [Found] GCC archive already downloaded
 
-    :: 检查是否已解压
+    REM Check if already extracted
     set "GCC_EXTRACT_DIR=%GCC_DOWNLOAD_DIR%\!GCC_ZIP:.zip=%"
     if exist "!GCC_EXTRACT_DIR!" (
         echo [Found] GCC already extracted and ready
@@ -876,7 +1308,7 @@ if exist "!GCC_ZIP_PATH!" (
 )
 
 echo.
-:: 设置 Nuitka 使用的 GCC 路径（如果还未设置）
+REM Set GCC path for Nuitka (if not already set)
 if not defined NUITKA_CACHE (
     set "NUITKA_CACHE=%GCC_DOWNLOAD_DIR%\!GCC_ZIP:.zip=%"
 )
@@ -885,7 +1317,7 @@ echo [Success] GCC compiler ready at: !NUITKA_CACHE!
 echo.
 goto :eof
 
-:: 下载 GCC
+REM Download GCC
 :download_gcc
 set "DOWNLOAD_URL=%~1"
 set "OUTPUT_PATH=%~2"
@@ -919,7 +1351,7 @@ if !DOWNLOAD_RESULT! equ 0 (
 echo.
 exit /b !DOWNLOAD_RESULT!
 
-:: 解压 GCC
+REM Extract GCC
 :extract_gcc
 set "ZIP_PATH=%~1"
 set "EXTRACT_DIR=%~2"
@@ -936,12 +1368,12 @@ if !EXTRACT_RESULT! equ 0 (
 )
 exit /b !EXTRACT_RESULT!
 
-:: 智能GCC缓存管理
+REM Smart GCC cache management
 :manage_gcc_cache
-:: 静默检查，不输出多余信息
+REM Silent check, no extra output
 goto :eof
 
-:: Smart compilation function
+REM Smart compilation function
 :compile_with_nuitka
 set "ATTEMPT=%~1"
 call :log_echo [COMPILE] Compilation attempt #%ATTEMPT%...
@@ -951,84 +1383,200 @@ echo Compilation Attempt #%ATTEMPT% >> "%ERROR_LOG%"
 echo Time: %time% >> "%ERROR_LOG%"
 echo -------------------------------------------- >> "%ERROR_LOG%"
 
-:: Build base Nuitka command
-:: Note Python path already quoted if contains spaces
-:: Use variable directly, batch will handle spaces automatically
+REM Build base Nuitka command
+REM Note Python path already quoted if contains spaces
+REM Use variable directly, batch will handle spaces automatically
 set "NUITKA_CMD=!PYTHON_EXE! -m nuitka"
-set "NUITKA_CMD=!NUITKA_CMD! --standalone"
-set "NUITKA_CMD=!NUITKA_CMD! --onefile"
+REM 使用 --mode=onefile (Nuitka 2.8.9+ 推荐语法，同时包含 standalone 功能)
+set "NUITKA_CMD=!NUITKA_CMD! --mode=onefile"
 set "NUITKA_CMD=!NUITKA_CMD! --output-dir=!TEMP_DIR!"
-:: Add console mode parameter directly based on configuration
+REM Add console mode parameter directly based on configuration
 if /i "!SHOW_CONSOLE!"=="true" (
     set "NUITKA_CMD=!NUITKA_CMD! --windows-console-mode=force"
 ) else (
     set "NUITKA_CMD=!NUITKA_CMD! --windows-console-mode=disable"
 )
 
-if not "!ICON_PARAM!"=="" (
-    set "NUITKA_CMD=!NUITKA_CMD! !ICON_PARAM!"
+REM Note: Icon parameter will be added after version info processing
+REM If resource file is used, icon is already included in it
+
+REM Process version format auto-convert to x.x.x.x format
+REM Use delayed expansion to ensure PROJECT_VERSION is set from detect_version_info
+set "WIN_VERSION=!PROJECT_VERSION!"
+echo [DEBUG-VERSION] PROJECT_VERSION value: [!PROJECT_VERSION!]
+echo [DEBUG-VERSION] WIN_VERSION initial value: [!WIN_VERSION!]
+if "!WIN_VERSION!"=="" (
+    set "WIN_VERSION=1.0.0"
+    echo [DEBUG-VERSION] Set WIN_VERSION to default: !WIN_VERSION!
+)
+echo [VERSION] Original version: !PROJECT_VERSION!
+echo [VERSION] Processing version format conversion...
+
+REM Check and convert version format without nested if blocks
+REM Use temporary variable to avoid variable loss in if blocks
+set "VERSION_CONVERTED=0"
+
+REM Count dots in version string to determine format
+set "DOT_COUNT=0"
+set "TEMP_VER=!WIN_VERSION!"
+:count_dots
+if "!TEMP_VER!"=="" goto :done_counting
+if "!TEMP_VER:~0,1!"=="." set /a DOT_COUNT+=1
+set "TEMP_VER=!TEMP_VER:~1!"
+goto :count_dots
+:done_counting
+
+echo [VERSION] Detected !DOT_COUNT! dots in version string
+
+REM Convert based on dot count (use nested if for compatibility)
+if "!DOT_COUNT!"=="3" (
+    echo [VERSION] Version already in 4-part format: !WIN_VERSION!
+    set "VERSION_CONVERTED=1"
+)
+if "!DOT_COUNT!"=="2" (
+    set "WIN_VERSION=!WIN_VERSION!.0"
+    echo [VERSION] Converted 3-part to 4-part format: !WIN_VERSION!
+    set "VERSION_CONVERTED=1"
+)
+if "!DOT_COUNT!"=="1" (
+    set "WIN_VERSION=!WIN_VERSION!.0.0"
+    echo [VERSION] Converted 2-part to 4-part format: !WIN_VERSION!
+    set "VERSION_CONVERTED=1"
+)
+if "!DOT_COUNT!"=="0" (
+    set "WIN_VERSION=!WIN_VERSION!.0.0.0"
+    echo [VERSION] Converted 1-part to 4-part format: !WIN_VERSION!
+    set "VERSION_CONVERTED=1"
+)
+if "!VERSION_CONVERTED!"=="0" (
+    echo [WARNING] Invalid version format, default will be used: 1.0.0.0
+    set "WIN_VERSION=1.0.0.0"
 )
 
-:: Process version format auto-convert to x.x.x.x format
-set "WIN_VERSION=%PROJECT_VERSION%"
-echo %WIN_VERSION% | findstr /R "^[0-9]*\.[0-9]*\.[0-9]*\.[0-9]*$" >nul
-if !errorlevel! neq 0 (
-    echo %WIN_VERSION% | findstr /R "^[0-9]*\.[0-9]*$" >nul
+REM Add version info - use Windows resource file for Chinese characters support
+echo [DEBUG-VERSION] Final WIN_VERSION after conversion: [!WIN_VERSION!]
+echo [VERSION] File version: !WIN_VERSION!
+echo [VERSION] Product version: !WIN_VERSION!
+
+REM Select product name and description based on Windows compatibility mode
+if /i "%WIN10_COMPAT_MODE%"=="true" (
+    echo [Windows 10/11] Windows 10/11 compatibility compilation mode
+    echo Windows 10/11 Compatibility Mode >> "%ERROR_LOG%"
+    set "PRODUCT_NAME_VALUE=!PROJECT_NAME!"
+    set "FILE_DESC_VALUE=!PROJECT_DESCRIPTION!"
+) else (
+    echo [Standard] Standard compilation mode
+    echo Standard Compilation Mode >> "%ERROR_LOG%"
+    set "PRODUCT_NAME_VALUE=!PROJECT_NAME!"
+    set "FILE_DESC_VALUE=!PROJECT_DESCRIPTION!"
+)
+echo [DEBUG] PROJECT_DESCRIPTION value: !PROJECT_DESCRIPTION!
+echo [DEBUG] FILE_DESC_VALUE after setting: !FILE_DESC_VALUE!
+echo [DEBUG] DETECTED_DESCRIPTION value: !DETECTED_DESCRIPTION!
+echo [DEBUG] DETECTED_DESCRIPTION_EN value: !DETECTED_DESCRIPTION_EN!
+
+REM Check if version info contains Chinese characters (requires resource file)
+set "USE_RC_FILE=false"
+set "HAS_CHINESE=false"
+if "!SUPPORTS_CHINESE!"=="true" (
+    REM Check if any field contains non-ASCII characters
+    echo !PRODUCT_NAME_VALUE!!FILE_DESC_VALUE!!PROJECT_COPYRIGHT! | findstr /R "[^\x00-\x7F]" >nul 2>&1
     if !errorlevel! equ 0 (
-        set "WIN_VERSION=%PROJECT_VERSION%.0.0"
-    ) else (
-        echo %WIN_VERSION% | findstr /R "^[0-9]*\.[0-9]*\.[0-9]*$" >nul
-        if !errorlevel! equ 0 (
-            set "WIN_VERSION=%PROJECT_VERSION%.0"
-        ) else (
-            set "WIN_VERSION=1.0.0.0"
+        set "USE_RC_FILE=true"
+        set "HAS_CHINESE=true"
+    )
+    REM Also check for Chinese characters directly
+    echo !PRODUCT_NAME_VALUE! | findstr /R "[\u4e00-\u9fff]" >nul 2>&1
+    if !errorlevel! equ 0 (
+        set "USE_RC_FILE=true"
+        set "HAS_CHINESE=true"
+    )
+    REM Simple heuristic: if product name or description contains non-letter-digit-space, assume Chinese
+    for /f "delims=" %%x in ("!PRODUCT_NAME_VALUE!") do (
+        echo %%x | findstr /R "^[a-zA-Z0-9 _.-]*$" >nul 2>&1
+        if !errorlevel! neq 0 (
+            set "USE_RC_FILE=true"
+            set "HAS_CHINESE=true"
         )
     )
 )
 
-:: Process company name may contain spaces, need quotes
-set "NUITKA_CMD=!NUITKA_CMD! --windows-company-name=!COMPANY_NAME!"
+REM Add version info - use Windows resource file for Chinese characters support
+echo [DEBUG-VERSION] Final WIN_VERSION after conversion: [!WIN_VERSION!]
+echo [VERSION] File version: !WIN_VERSION!
+echo [VERSION] Product version: !WIN_VERSION!
+
+REM Add version info - use command line parameters (Nuitka 2.8.9 supports Chinese via command line)
+REM Note: Nuitka 2.8.9 does not support --windows-force-rc-file, so we will use command line parameters
+set "RC_FILE_PATH="
+REM Always use version info directly (prefer Chinese if available, fallback to English)
+REM Product name: prefer Chinese (PRODUCT_NAME_VALUE), fallback to English
+if not "!PRODUCT_NAME_VALUE!"=="" (
+    set "NUITKA_CMD=!NUITKA_CMD! --windows-product-name=^"!PRODUCT_NAME_VALUE!^""
+    call :log_echo [INFO] Using product name: !PRODUCT_NAME_VALUE!
+) else if defined DETECTED_APP_NAME_EN (
+    set "NUITKA_CMD=!NUITKA_CMD! --windows-product-name=^"!DETECTED_APP_NAME_EN!^""
+    call :log_echo [INFO] Using English product name: !DETECTED_APP_NAME_EN!
+)
+REM File description: always prefer Chinese (DETECTED_DESCRIPTION) if available, then FILE_DESC_VALUE, finally English
+REM Since product name and copyright can display Chinese, we should use Chinese description too
+if not "!DETECTED_DESCRIPTION!"=="" (
+    REM Use Chinese description directly (highest priority)
+    set "FILE_DESC_RAW=!DETECTED_DESCRIPTION!"
+    set "NUITKA_CMD=!NUITKA_CMD! --windows-file-description=^"!FILE_DESC_RAW!^""
+    call :log_echo [INFO] Using Chinese description: "!FILE_DESC_RAW!"
+    echo [DEBUG] Using DETECTED_DESCRIPTION: "!FILE_DESC_RAW!"
+) else if not "!FILE_DESC_VALUE!"=="" (
+    REM Fallback to FILE_DESC_VALUE if DETECTED_DESCRIPTION is not available
+    set "FILE_DESC_RAW=!FILE_DESC_VALUE!"
+    set "NUITKA_CMD=!NUITKA_CMD! --windows-file-description=^"!FILE_DESC_RAW!^""
+    call :log_echo [INFO] Using file description: "!FILE_DESC_RAW!"
+    echo [DEBUG] FILE_DESC_VALUE: "!FILE_DESC_RAW!"
+) else if not "!DETECTED_DESCRIPTION_EN!"=="" (
+    REM Last resort: use English description
+    set "FILE_DESC_RAW=!DETECTED_DESCRIPTION_EN!"
+    set "NUITKA_CMD=!NUITKA_CMD! --windows-file-description=^"!FILE_DESC_RAW!^""
+    call :log_echo [INFO] Using English description: "!FILE_DESC_RAW!"
+    echo [DEBUG] Using DETECTED_DESCRIPTION_EN: "!FILE_DESC_RAW!"
+)
+set "NUITKA_CMD=!NUITKA_CMD! --windows-company-name=^"!COMPANY_NAME!^""
 set "NUITKA_CMD=!NUITKA_CMD! --windows-file-version=!WIN_VERSION!"
 set "NUITKA_CMD=!NUITKA_CMD! --windows-product-version=!WIN_VERSION!"
-
-:: Select parameters based on Windows compatibility mode
-if /i "%WIN10_COMPAT_MODE%"=="true" (
-    call :log_echo [Windows 10/11] Using Windows 10/11 compatibility compilation parameters
-    echo Windows 10/11 Compatibility Mode >> "%ERROR_LOG%"
-    :: Build product name and file description with Win10 suffix
-    set "PRODUCT_NAME_VALUE=!PROJECT_NAME! Win10"
-    set "FILE_DESC_VALUE=!PROJECT_DESCRIPTION! - Windows 10/11 Compatible"
-) else (
-    call :log_echo [Standard] Using standard compilation parameters
-    echo Standard Compilation Mode >> "%ERROR_LOG%"
-    :: Use original project name and description
-    set "PRODUCT_NAME_VALUE=!PROJECT_NAME!"
-    set "FILE_DESC_VALUE=!PROJECT_DESCRIPTION!"
+set "COPYRIGHT_LOG="
+if defined PROJECT_COPYRIGHT (
+    set "NUITKA_CMD=!NUITKA_CMD! --copyright=^"!PROJECT_COPYRIGHT!^""
+    set "COPYRIGHT_LOG=!PROJECT_COPYRIGHT!"
+)
+if defined COPYRIGHT_LOG (
+    set "COPYRIGHT_LOG=!COPYRIGHT_LOG:(=^(!"
+    set "COPYRIGHT_LOG=!COPYRIGHT_LOG:)=^)!"
+    call :log_echo [INFO] Copyright: !COPYRIGHT_LOG!
 )
 
-:: Add Windows version info parameters
-:: Note: Replace spaces in values with underscores to avoid parameter parsing issues
-:: Nuitka will still work correctly with underscores in product names
-set "PRODUCT_NAME_SAFE=!PRODUCT_NAME_VALUE: =_!"
-set "FILE_DESC_SAFE=!FILE_DESC_VALUE: =_!"
-set "NUITKA_CMD=!NUITKA_CMD! --windows-product-name=!PRODUCT_NAME_SAFE!"
-set "NUITKA_CMD=!NUITKA_CMD! --windows-file-description=!FILE_DESC_SAFE!"
+REM Add icon parameter
+REM Note: Nuitka 2.8.9 does not support resource files, so always add icon parameter separately
+if not "!ICON_PARAM!"=="" (
+    set "NUITKA_CMD=!NUITKA_CMD! !ICON_PARAM!"
+    call :log_echo [INFO] Using icon: !ICON_FILE!
+) else (
+    call :log_echo [WARNING] No icon parameter specified, exe will use default icon
+)
 
-:: Add package parameters
-:: Enable PyQt6 plugin support fix missing Qt platform plugin issue
+REM Add package parameters
+REM Enable PyQt6 plugin support fix missing Qt platform plugin issue
 set "NUITKA_CMD=!NUITKA_CMD! --enable-plugin=pyqt6"
 call :log_echo [INFO] PyQt6 plugin enabled for Qt platform support
 if not "!INCLUDE_PARAM!"=="" (
     set "NUITKA_CMD=!NUITKA_CMD! !INCLUDE_PARAM!"
 )
 
-:: Add exclude import parameters auto-exclude unnecessary dependencies to reduce build time
+REM Add exclude import parameters auto-exclude unnecessary dependencies to reduce build time
 if not "!EXCLUDE_PARAM!"=="" (
     set "NUITKA_CMD=!NUITKA_CMD! !EXCLUDE_PARAM!"
     call :log_echo [Optimize] Dependency exclusion enabled to reduce build time
 )
 
-:: LTO optimization
+REM LTO optimization
 if /i "!ENABLE_LTO!"=="true" (
     set "NUITKA_CMD=!NUITKA_CMD! --lto=yes"
     call :log_echo [INFO] LTO link-time optimization enabled
@@ -1037,40 +1585,38 @@ if /i "!ENABLE_LTO!"=="true" (
     call :log_echo [INFO]   - Slightly increases compile time
 )
 
-:: Python optimization
+REM Python optimization
 if /i "!ENABLE_PYTHON_OPT!"=="true" (
     set "NUITKA_CMD=!NUITKA_CMD! --python-flag=no_docstrings"
     set "NUITKA_CMD=!NUITKA_CMD! --python-flag=no_asserts"
-    set "NUITKA_CMD=!NUITKA_CMD! --python-flag=-O"
     call :log_echo [INFO] Python bytecode optimization enabled
     call :log_echo [INFO]   - Removes docstrings
     call :log_echo [INFO]   - Disables assert statements
-    call :log_echo [INFO]   - Enables Python -O flag
 )
 
-:: Disable unnecessary plugins and features to speed up build
+REM Disable unnecessary plugins and features to speed up build
 set "NUITKA_CMD=!NUITKA_CMD! --no-prefer-source-code"
 
-:: PyQt6 specific configuration include Qt platform plugins and resources
+REM PyQt6 specific configuration include Qt platform plugins and resources
 call :log_echo [INFO] Configuring PyQt6 platform plugins and dependencies
 set "NUITKA_CMD=!NUITKA_CMD! --include-qt-plugins=sensible,platforms,styles,iconengines,imageformats"
-:: Include all necessary PyQt6 data files and DLLs
+REM Include all necessary PyQt6 data files and DLLs
 set "NUITKA_CMD=!NUITKA_CMD! --include-package-data=PyQt6"
 
-:: Add progress and report parameters
+REM Add progress and report parameters
 set "NUITKA_CMD=!NUITKA_CMD! --show-progress"
 set "NUITKA_CMD=!NUITKA_CMD! --show-memory"
 set "NUITKA_CMD=!NUITKA_CMD! --assume-yes-for-downloads"
 
-:: Add resources directory to package (for runtime use - icons, etc.)
+REM Add resources directory to package (for runtime use - icons, etc.)
 set "RESOURCES_DIR=!PROJECT_ROOT!resources"
 if exist "!RESOURCES_DIR!" (
-    :: Include entire resources directory for runtime access
+    REM Include entire resources directory for runtime access
     set "NUITKA_CMD=!NUITKA_CMD! --include-data-dir=!RESOURCES_DIR!=resources"
     call :log_echo [INFO] Including resources directory in package
 ) else (
-    :: Fallback: try to include just icon file if resources dir doesn't exist
-    if not "!ICON_PARAM!"=="" (
+    REM Fallback: try to include just icon file if resources dir doesn't exist
+if not "!ICON_PARAM!"=="" (
         if defined ICON_FULL_PATH (
             if exist "!ICON_FULL_PATH!" (
                 set "NUITKA_CMD=!NUITKA_CMD! --include-data-file=!ICON_FULL_PATH!=icon.ico"
@@ -1080,9 +1626,9 @@ if exist "!RESOURCES_DIR!" (
     )
 )
 
-:: Add extra parameters check if contains deprecated console parameters
+REM Add extra parameters check if contains deprecated console parameters
 if not "%EXTRA_NUITKA_ARGS%"=="" (
-    :: Check and warn if using old console parameters
+    REM Check and warn if using old console parameters
     echo %EXTRA_NUITKA_ARGS% | findstr /i "--disable-console --enable-console" >nul
     if !errorlevel! equ 0 (
         call :log_echo [WARNING] EXTRA_NUITKA_ARGS contains deprecated console options
@@ -1090,43 +1636,43 @@ if not "%EXTRA_NUITKA_ARGS%"=="" (
     )
     set "NUITKA_CMD=!NUITKA_CMD! !EXTRA_NUITKA_ARGS!"
 )
-:: Add main file as positional argument
+REM Add main file as positional argument
 set "NUITKA_CMD=!NUITKA_CMD! !MAIN_FILE!"
 
-:: Execute compilation using delayed expansion to ensure variables are correctly expanded
-:: Note: Use delayed expansion !NUITKA_CMD! instead of immediate expansion %NUITKA_CMD%
-:: Write command to temporary batch file for reliable execution with complex arguments
+REM Execute compilation using delayed expansion to ensure variables are correctly expanded
+REM Note: Use delayed expansion !NUITKA_CMD! instead of immediate expansion %NUITKA_CMD%
+REM Write command to temporary batch file for reliable execution with complex arguments
 set "TEMP_CMD_FILE=%TEMP%\nuitka_cmd_%RANDOM%.bat"
 set "TEMP_OUTPUT=%TEMP%\nuitka_output_%RANDOM%.txt"
 
-:: Log the full command for debugging (icon parameter should be visible)
+REM Log the full command for debugging (icon parameter should be visible)
 call :log_echo [DEBUG] Full Nuitka command: !NUITKA_CMD!
 
-:: Write the command to temporary batch file
-:: Simple approach: write the command directly
+REM Write the command to temporary batch file
+REM Simple approach: write the command directly
 > "!TEMP_CMD_FILE!" echo @echo off
 >> "!TEMP_CMD_FILE!" echo !NUITKA_CMD!
-:: Execute the temporary batch file and capture output
+REM Execute the temporary batch file and capture output
 call "!TEMP_CMD_FILE!" > "!TEMP_OUTPUT!" 2>&1
 set "COMPILE_RESULT=!errorlevel!"
-:: Clean up temporary command file
+REM Clean up temporary command file
 if exist "!TEMP_CMD_FILE!" del "!TEMP_CMD_FILE!" >nul 2>&1
 
-:: Filter output: only show actual errors, suppress help messages
+REM Filter output: only show actual errors, suppress help messages
 if exist "!TEMP_OUTPUT!" (
-    :: Check if output contains help message (indicates parameter error)
+    REM Check if output contains help message (indicates parameter error)
     findstr /C:"Usage:" "!TEMP_OUTPUT!" >nul 2>&1
     if !errorlevel! equ 0 (
-        :: Help message detected, only output error lines (lines containing "FATAL", "ERROR", "Error")
+        REM Help message detected, only output error lines (lines containing "FATAL", "ERROR", "Error")
         findstr /C:"FATAL" /C:"ERROR" /C:"Error" /C:"error" "!TEMP_OUTPUT!" >> "%ERROR_LOG%" 2>&1
     ) else (
-        :: No help message, output all content
+        REM No help message, output all content
         type "!TEMP_OUTPUT!" >> "%ERROR_LOG%" 2>&1
     )
     del "!TEMP_OUTPUT!" >nul 2>&1
 )
 
-:: Record compilation result
+REM Record compilation result
 if !COMPILE_RESULT! neq 0 (
     echo Compilation attempt #%ATTEMPT% FAILED with error code: !COMPILE_RESULT! >> "%ERROR_LOG%"
     echo. >> "%ERROR_LOG%"
@@ -1135,7 +1681,7 @@ if !COMPILE_RESULT! neq 0 (
     echo. >> "%ERROR_LOG%"
 )
 
-:: If failed and attempts less than 3, continue retry
+REM If failed and attempts less than 3, continue retry
 if !COMPILE_RESULT! neq 0 (
     if %ATTEMPT% LSS 3 (
         call :log_echo [RETRY] Compilation attempt #%ATTEMPT% failed with error code !COMPILE_RESULT!, preparing retry...
@@ -1147,30 +1693,32 @@ if !COMPILE_RESULT! neq 0 (
 
 exit /b !COMPILE_RESULT!
 
-:: 失败诊断和指导
+REM Failure diagnosis and guidance
 :failure_diagnosis_and_guidance
 echo [Diagnostics] Starting intelligent failure analysis...
 
-:: 检查网络状态
+REM Check network status
 call :check_network_advanced 2>nul
 
-:: 检查磁盘空间
+REM Check disk space
 echo [System] Checking disk space...
-for /f "tokens=3" %%a in ('dir /-c "%SystemDrive%\" 2^>nul ^| find "bytes free"') do (
-    set "FREE_BYTES=%%a"
+set "FREE_BYTES="
+for /f "tokens=3" %%a in ('dir /-c "%SystemDrive%\" 2^>nul ^| find "bytes free"') do set "FREE_BYTES=%%a"
     if defined FREE_BYTES (
-        set /a "FREE_GB=!FREE_BYTES! / 1073741824"
+    REM Remove commas from number (e.g., 1,234,567,890 -> 1234567890)
+    set "FREE_BYTES=!FREE_BYTES:,=!"
+    REM Use PowerShell for large number division to avoid 32-bit limit
+    for /f %%b in ('powershell -Command "!FREE_BYTES! / 1073741824"') do set "FREE_GB=%%b"
         if !FREE_GB! LSS 5 (
-            echo [Warning] Insufficient disk space: !FREE_GB!GB (recommend at least 5GB)
+        echo [Warning] Insufficient disk space: !FREE_GB!GB ^(recommend at least 5GB^)
         ) else (
             echo [Normal] Sufficient disk space: !FREE_GB!GB
         )
     ) else (
         echo [Warning] Unable to determine disk space
-    )
 )
 
-:: 检查临时目录权限
+REM Check temporary directory permissions
 echo [Permission] Checking temporary directory permissions...
 echo test > "%TEMP%\nuitka_test.tmp" 2>nul
 if !errorlevel! neq 0 (
@@ -1198,18 +1746,18 @@ echo 2. Use virtual environment: python -m venv venv
 echo 3. Update Nuitka: pip install --upgrade nuitka
 echo 4. Check Python version compatibility
 echo.
-echo [Error Log]
-echo Detailed error log saved to: %ERROR_LOG%
-echo Please check the log file for detailed error messages
+echo [Build Log]
+echo Detailed build log saved to: %ERROR_LOG%
+echo Please check the log file for detailed messages
 echo.
 goto :eof
 
-:: Calculate and display elapsed time
+REM Calculate and display elapsed time
 :show_elapsed_time
 set "END_TIME=%time%"
 set "END_DATE=%date%"
 
-:: 解析开始时间
+REM Parse start time
 for /f "tokens=1-4 delims=:., " %%a in ("%START_TIME%") do (
     set /a "START_H=%%a"
     set /a "START_M=%%b"
@@ -1217,7 +1765,7 @@ for /f "tokens=1-4 delims=:., " %%a in ("%START_TIME%") do (
     set /a "START_MS=%%d"
 )
 
-:: 解析结束时间
+REM Parse end time
 for /f "tokens=1-4 delims=:., " %%a in ("%END_TIME%") do (
     set /a "END_H=%%a"
     set /a "END_M=%%b"
@@ -1225,16 +1773,16 @@ for /f "tokens=1-4 delims=:., " %%a in ("%END_TIME%") do (
     set /a "END_MS=%%d"
 )
 
-:: 转换为总毫秒数
+REM Convert to total milliseconds
 set /a "START_TOTAL_MS=(START_H*3600000)+(START_M*60000)+(START_S*1000)+START_MS"
 set /a "END_TOTAL_MS=(END_H*3600000)+(END_M*60000)+(END_S*1000)+END_MS"
 
-:: 处理跨天情况
+REM Handle cross-day case
 if !END_TOTAL_MS! LSS !START_TOTAL_MS! (
     set /a "END_TOTAL_MS+=86400000"
 )
 
-:: 计算耗时
+REM Calculate elapsed time
 set /a "ELAPSED_MS=END_TOTAL_MS-START_TOTAL_MS"
 set /a "ELAPSED_S=ELAPSED_MS/1000"
 set /a "ELAPSED_M=ELAPSED_S/60"

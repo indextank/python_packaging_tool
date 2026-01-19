@@ -191,6 +191,26 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
             color: {colors.text_disabled};
         }}
 
+        /* Secondary Button (Gray) */
+        QPushButton[buttonType="secondary"] {{
+            background-color: {colors.background_tertiary};
+            color: {colors.text_primary};
+            border: 1px solid {colors.border_primary};
+        }}
+
+        QPushButton[buttonType="secondary"]:hover {{
+            background-color: {colors.border_secondary};
+        }}
+
+        QPushButton[buttonType="secondary"]:pressed {{
+            background-color: {colors.border_primary};
+        }}
+
+        QPushButton[buttonType="secondary"]:disabled {{
+            background-color: {colors.border_primary};
+            color: {colors.text_disabled};
+        }}
+
         QCheckBox {{
             color: {colors.text_primary};
             background-color: transparent;
@@ -261,6 +281,28 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
             image: none;
         }}
 
+        QMenuBar {{
+            background-color: {colors.background_primary};
+            color: {colors.text_primary};
+            border-bottom: 1px solid {colors.border_primary};
+        }}
+
+        QMenuBar::item {{
+            background-color: transparent;
+            color: {colors.text_primary};
+            padding: 5px 10px;
+        }}
+
+        QMenuBar::item:selected {{
+            background-color: {colors.accent_primary};
+            color: white;
+        }}
+
+        QMenuBar::item:pressed {{
+            background-color: {colors.accent_pressed};
+            color: white;
+        }}
+
         QMenu {{
             background-color: {colors.background_secondary};
             border: 1px solid {colors.border_primary};
@@ -270,6 +312,7 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
         QMenu::item {{
             padding: 5px 20px;
             background-color: {colors.background_secondary};
+            color: {colors.text_primary};
         }}
 
         QMenu::item:selected {{

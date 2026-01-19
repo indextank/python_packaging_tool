@@ -64,6 +64,46 @@
 - **依赖自动分析**：基于AST语法树分析，精准识别依赖
 - **虚拟环境管理**：自动创建和管理独立虚拟环境
 - **Python环境检测**：自动查找系统已安装的Python版本
+- **常用库深度支持**：内置100+常用库的隐藏导入配置，包括：
+  - **Web爬虫**：selenium、scrapy、playwright、requests-html、beautifulsoup4、lxml
+  - **Web框架**：flask、django、fastapi、tornado、aiohttp、streamlit、gradio、dash
+  - **GUI框架**：PyQt5/6、PySide2/6、tkinter、wxPython、kivy、customtkinter、flet、dearpygui
+  - **数据科学**：numpy、pandas、scipy、matplotlib、seaborn、plotly、bokeh、altair、statsmodels
+  - **机器学习**：scikit-learn、tensorflow、pytorch、transformers、xgboost、lightgbm、catboost、onnxruntime
+  - **数据库**：pymongo、redis、pymysql、psycopg2、sqlalchemy、motor、aiomysql、aiopg、peewee、alembic、sqlmodel
+  - **办公文档**：openpyxl、python-docx、python-pptx、PyPDF2、pdfplumber、pymupdf、reportlab、xlrd、xlwt
+  - **任务调度**：celery、apscheduler、schedule
+  - **实用工具**：loguru、tqdm、click、typer、colorama、jieba、qrcode、faker、pydantic、marshmallow、tenacity
+  - **网络请求**：requests、httpx、aiohttp、websocket、paramiko、uvloop、httptools、gunicorn
+  - **图像处理**：Pillow、opencv-python、imageio、pytesseract、easyocr
+  - **音频处理**：pygame、pyglet、sounddevice、soundfile、pyaudio、pydub
+  - **游戏开发**：pygame、pyglet、arcade、panda3d、ursina
+  - **系统交互**：pywin32、pyautogui、pynput、keyboard、mouse、comtypes、pythonnet
+  - **缓存序列化**：joblib、dill、cloudpickle、cachetools、diskcache
+  - **日期时间**：arrow、pendulum、pytz、python-dateutil
+  - **文本处理**：markdown、mistune、pyyaml、toml、python-dotenv
+
+### 🛡️ 三层防护机制
+
+为确保所有库（包括未预配置的库）都能正常打包运行，工具实现了智能三层防护：
+
+1. **第一层：动态模块追踪**
+   - 自动检测脚本是否可运行
+   - 运行时追踪所有实际导入的模块
+   - 捕获动态导入（`__import__`、`importlib`）
+   - 脚本不可运行时自动切换到通用策略
+
+2. **第二层：自动收集子模块**
+   - 对未配置的库自动收集所有子模块
+   - PyInstaller 使用 `--collect-all` 完整收集
+   - Nuitka 使用 `--include-package` 包含整个包
+   - 添加常见子模块模式（utils、core、base、main 等）
+
+3. **第三层：失败重试机制**
+   - 打包后自动测试运行 exe
+   - 检测 `ModuleNotFoundError` 并提取缺失模块
+   - 自动添加缺失模块并重新打包（最多重试2次）
+   - 确保最终生成的程序能正常运行
 
 ### 🚀 智能优化
 
@@ -167,7 +207,7 @@
 
 ![使用流程](ScreenShot/ScreenShot_1.png)
 
-*主界面 - 选择文件、配置选项、开始打包*
+_主界面 - 选择文件、配置选项、开始打包_
 
 </div>
 
@@ -569,6 +609,83 @@ chore: 构建/工具链相关
 
 ---
 
+## 📝 更新日志
+
+### v1.3.0 (最新)
+
+**🛡️ 重大更新：三层防护机制**
+
+- ✨ **第一层：动态模块导入追踪**
+  - 自动检测脚本是否可运行
+  - 运行时追踪所有实际导入的模块
+  - 捕获动态导入（`__import__`、`importlib`）
+  - 脚本不可运行时自动切换到通用策略
+
+- ✨ **第二层：自动收集子模块**
+  - 对未配置的库自动收集所有子模块
+  - PyInstaller 使用 `--collect-all` 完整收集
+  - Nuitka 使用 `--include-package` 包含整个包
+  - 添加11种常见子模块模式（utils、core、base、main、api、models 等）
+
+- ✨ **第三层：失败重试机制**
+  - 打包后自动测试运行 exe
+  - 检测 `ModuleNotFoundError` 并提取缺失模块名
+  - 自动添加缺失模块并重新打包（最多重试2次）
+  - 确保最终生成的程序能正常运行
+
+- 🔧 **技术改进**
+  - 新增已配置库列表（168个库）用于智能判断
+  - 未配置的库自动使用通用策略
+  - 增强 PyInstaller/Nuitka 的 Analysis 阶段
+  - 支持所有 Python 第三方库（不限于预配置列表）
+
+### v1.2.0
+
+**🎉 继续扩展：新增48个常用库支持**
+
+- ✨ **新增48个库的深度支持（总计100+库）**
+  - **PDF处理**: pymupdf (fitz)、reportlab
+  - **Markdown**: markdown、mistune
+  - **OCR识别**: pytesseract、easyocr
+  - **AI推理**: onnxruntime
+  - **数据可视化**: gradio、streamlit、dash、bokeh、altair
+  - **数据库ORM**: sqlmodel、alembic、peewee、motor、aiomysql、aiopg
+  - **性能优化**: httptools、uvloop、gunicorn
+  - **日期时间**: pytz、python-dateutil
+  - **工具库**: faker、attrs、pydantic、marshmallow、tenacity、retrying
+  - **缓存**: cachetools、diskcache、joblib、dill、cloudpickle
+  - **游戏开发**: pygame (25个子模块)、pyglet、arcade、panda3d、ursina
+  - **系统交互**: pythonnet、comtypes、pynput、keyboard、mouse
+  - **音频处理**: sounddevice、soundfile、pyaudio、pydub
+
+- 📊 **统计数据**
+  - 新增197个隐藏导入配置
+  - 累计支持100+常用库
+  - 累计668+个隐藏导入自动配置
+
+### v1.1.0
+
+**🎉 重大更新：增强常用库支持**
+
+- ✨ **新增50+常用库的深度支持**
+  - 自动为这些库添加必要的隐藏导入，无需手动配置
+  - 支持 selenium、scrapy、playwright 等 Web 爬虫框架
+  - 支持 flask、django、fastapi 等 Web 开发框架
+  - 支持 PyQt、tkinter、kivy 等多种 GUI 框架
+  - 支持 numpy、pandas、tensorflow、pytorch 等数据科学和机器学习库
+  - 支持 openpyxl、python-docx、PyPDF2 等办公文档处理库
+
+- 🐛 **修复 selenium 打包问题**
+  - 解决打包后运行提示 "ModuleNotFoundError: No module named 'selenium'" 的问题
+  - 自动包含所有 selenium 子模块（webdriver、common、support 等）
+  - 确保 Chrome、Firefox、Edge 等浏览器驱动正常工作
+
+- 🔧 **优化依赖分析**
+  - 新增471个常用库的隐藏导入配置
+  - 智能识别库的依赖关系
+  - 自动包含运行时动态加载的模块
+
+---
 
 ## 📄 许可证
 

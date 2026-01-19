@@ -61,6 +61,405 @@ class Packager:
         self._is_domestic_network: Optional[bool] = None  # 缓存网络环境检测结果
         self._pip_mirrors: Optional[List[Tuple[str, Optional[str]]]] = None  # 当前使用的镜像源列表
 
+    def _add_version_info_cmdline(self, cmd: List[str], product_name: str, company_name: str,
+                                   file_description: str, copyright_text: str, version_str: str) -> None:
+        """通过命令行参数添加 Windows 版本信息"""
+        if product_name:
+            cmd.append(f"--windows-product-name={product_name}")
+            self.log(f"  ✓ 产品名称: {product_name}")
+        if company_name:
+            cmd.append(f"--windows-company-name={company_name}")
+            self.log(f"  ✓ 公司名称: {company_name}")
+        if file_description:
+            cmd.append(f"--windows-file-description={file_description}")
+            self.log(f"  ✓ 文件描述: {file_description}")
+        if copyright_text:
+            cmd.append(f"--copyright={copyright_text}")
+            self.log(f"  ✓ 版权信息: {copyright_text}")
+        if version_str:
+            cmd.append(f"--windows-product-version={version_str}")
+            cmd.append(f"--windows-file-version={version_str}")
+            self.log(f"  ✓ 版本号: {version_str}")
+
+    def _create_version_resource_file(self, output_dir: str, script_name: str,
+                                       product_name: str, company_name: str,
+                                       file_description: str, copyright_text: str,
+                                       version_str: str, icon_path: Optional[str] = None) -> Optional[str]:
+        """
+        创建 Windows 资源文件(.rc)并编译为 .res 文件，用于支持中文版本信息
+
+        Args:
+            output_dir: 输出目录
+            script_name: 脚本名称（用于内部名称）
+            product_name: 产品名称
+            company_name: 公司名称
+            file_description: 文件描述
+            copyright_text: 版权信息
+            version_str: 版本号
+            icon_path: 图标路径（可选）
+
+        Returns:
+            编译后的 .res 文件路径，失败返回 None
+        """
+        try:
+            # 解析版本号为四段式
+            version_parts = version_str.split(".")
+            while len(version_parts) < 4:
+                version_parts.append("0")
+            version_parts = [p if p.isdigit() else "0" for p in version_parts[:4]]
+            version_tuple = ",".join(version_parts)
+            version_dot = ".".join(version_parts)
+
+            # 转义特殊字符
+            def escape_rc_string(s: str) -> str:
+                if not s:
+                    return ""
+                return s.replace("\\", "\\\\").replace('"', '\\"')
+
+            product_name_escaped = escape_rc_string(product_name)
+            company_name_escaped = escape_rc_string(company_name)
+            file_description_escaped = escape_rc_string(file_description)
+            copyright_text_escaped = escape_rc_string(copyright_text)
+
+            # 构建 .rc 文件内容
+            # 不包含 windows.h - 手动定义所需常量以避免依赖
+            rc_content = f'''// 版本信息资源 - 由 Python打包工具 自动生成
+// 支持中文字符
+// 自包含 - 不需要 windows.h
+
+// 手动定义常量 (来自 winver.h)
+#ifndef VS_VERSION_INFO
+#define VS_VERSION_INFO 1
+#endif
+#define VOS_NT_WINDOWS32 0x00040004L
+#define VFT_APP 0x00000001L
+
+'''
+            # 如果有图标，添加图标资源
+            if icon_path:
+                # 转换路径分隔符
+                icon_path_escaped = icon_path.replace("\\", "\\\\").replace("/", "\\\\")
+                rc_content += f'IDI_ICON1 ICON "{icon_path_escaped}"\n\n'
+
+            rc_content += f'''VS_VERSION_INFO VERSIONINFO
+ FILEVERSION {version_tuple}
+ PRODUCTVERSION {version_tuple}
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "{company_name_escaped}"
+            VALUE "FileDescription", "{file_description_escaped}"
+            VALUE "FileVersion", "{version_dot}"
+            VALUE "InternalName", "{escape_rc_string(script_name)}"
+            VALUE "LegalCopyright", "{copyright_text_escaped}"
+            VALUE "ProductName", "{product_name_escaped}"
+            VALUE "ProductVersion", "{version_dot}"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
+'''
+
+            # 写入 .rc 文件（使用 UTF-8 with BOM，Windows rc.exe 支持）
+            rc_file_path = os.path.join(output_dir, "version_info.rc")
+            with open(rc_file_path, "w", encoding="utf-8-sig") as f:
+                f.write(rc_content)
+
+            self.log(f"  已创建资源文件: {rc_file_path}")
+
+            # 查找 Windows SDK 的 rc.exe
+            rc_exe = self._find_rc_exe()
+
+            if not rc_exe:
+                self.log("  ⚠️  未找到 Windows SDK 资源编译器 (rc.exe)")
+                self.log("  提示: 请安装 Windows SDK 或 Visual Studio Build Tools")
+                return None
+
+            self.log(f"  使用资源编译器: {rc_exe}")
+
+            # 编译 .rc 为 .res
+            res_file_path = os.path.join(output_dir, "version_info.res")
+
+            include_dirs = self._get_windows_sdk_include_dirs()
+            include_args: List[str] = []
+            for include_dir in include_dirs:
+                include_args.extend(["/I", include_dir])
+
+            if not include_dirs:
+                self.log("  ⚠️  未找到 Windows SDK Include 目录，可能无法编译包含 windows.h 的资源文件")
+
+            # 执行编译命令
+            compile_cmd = [rc_exe, "/fo", res_file_path, "/nologo"] + include_args + [rc_file_path]
+
+            result = subprocess.run(
+                compile_cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                cwd=output_dir
+            )
+
+            if result.returncode == 0 and os.path.exists(res_file_path):
+                self.log(f"  已编译资源文件: {res_file_path}")
+                return res_file_path
+            else:
+                self.log(f"  ⚠️  资源编译失败，返回码: {result.returncode}")
+                if result.stdout:
+                    self.log(f"  stdout: {result.stdout.strip()}")
+                if result.stderr:
+                    self.log(f"  stderr: {result.stderr.strip()}")
+                return None
+
+        except Exception as e:
+            self.log(f"  ⚠️  创建资源文件时出错: {str(e)}")
+            return None
+
+    def check_windows_sdk_support(self) -> Tuple[bool, str]:
+        """
+        检查系统是否支持中文版本信息（Windows SDK/Visual Studio）
+
+        Returns:
+            (是否支持, 描述信息)
+        """
+        rc_exe = self._find_rc_exe()
+        if rc_exe:
+            include_dirs = self._get_windows_sdk_include_dirs()
+            if not include_dirs:
+                return False, "检测到 rc.exe，但未找到 Windows SDK Include 目录（windows.h），请安装 Windows SDK C++ 组件"
+
+            if "Windows Kits" in rc_exe:
+                return True, f"检测到 Windows SDK (rc.exe: {rc_exe})"
+            elif "Visual Studio" in rc_exe:
+                return True, f"检测到 Visual Studio (rc.exe: {rc_exe})"
+            else:
+                return True, f"检测到资源编译器 (rc.exe: {rc_exe})"
+
+        # 检查是否存在 Windows SDK 或 Visual Studio 目录（即使没找到 rc.exe）
+        sdk_paths = [
+            r"C:\Program Files (x86)\Windows Kits\10",
+            r"C:\Program Files\Windows Kits\10",
+        ]
+        vs_paths = [
+            r"C:\Program Files\Microsoft Visual Studio",
+            r"C:\Program Files (x86)\Microsoft Visual Studio",
+        ]
+
+        for path in sdk_paths:
+            if os.path.exists(path):
+                return False, "检测到 Windows SDK 目录，但未找到 rc.exe，可能需要安装 Windows SDK 开发工具"
+
+        for path in vs_paths:
+            if os.path.exists(path):
+                return False, "检测到 Visual Studio 目录，但未找到 rc.exe，可能需要安装 C++ 桌面开发工具"
+
+        return False, "未检测到 Windows SDK 或 Visual Studio，中文版本信息可能无法正常显示"
+
+    def _get_windows_sdk_include_dirs(self) -> List[str]:
+        """
+        获取 Windows SDK Include 目录（用于 rc.exe 编译 resources）
+
+        Returns:
+            Include 目录列表（um/shared/ucrt 等），未找到返回空列表
+        """
+        include_roots = [
+            r"C:\Program Files (x86)\Windows Kits\10\Include",
+            r"C:\Program Files\Windows Kits\10\Include",
+        ]
+
+        for root in include_roots:
+            if not os.path.exists(root):
+                continue
+
+            try:
+                versions = [v for v in os.listdir(root) if v.startswith("10.")]
+                versions.sort(reverse=True)
+                for version in versions:
+                    version_dir = os.path.join(root, version)
+                    if not os.path.isdir(version_dir):
+                        continue
+                    candidates = [
+                        os.path.join(version_dir, "um"),
+                        os.path.join(version_dir, "shared"),
+                        os.path.join(version_dir, "ucrt"),
+                        os.path.join(version_dir, "winrt"),
+                    ]
+                    include_dirs = [p for p in candidates if os.path.isdir(p)]
+                    if include_dirs:
+                        return include_dirs
+            except Exception:
+                continue
+
+        return []
+
+    def _find_rc_exe(self) -> Optional[str]:
+        """
+        查找 Windows SDK 的资源编译器 rc.exe
+
+        Returns:
+            rc.exe 的完整路径，未找到返回 None
+        """
+        # 首先检查 PATH 中是否有 rc.exe
+        rc_in_path = shutil.which("rc.exe")
+        if rc_in_path:
+            return rc_in_path
+
+        # 搜索 Windows SDK 安装目录
+        sdk_roots = [
+            r"C:\Program Files (x86)\Windows Kits\10\bin",
+            r"C:\Program Files\Windows Kits\10\bin",
+        ]
+
+        # 按版本号降序排列，优先使用新版本
+        for sdk_root in sdk_roots:
+            if not os.path.exists(sdk_root):
+                continue
+
+            try:
+                # 获取所有版本目录
+                versions = []
+                for item in os.listdir(sdk_root):
+                    item_path = os.path.join(sdk_root, item)
+                    if os.path.isdir(item_path) and item.startswith("10."):
+                        versions.append(item)
+
+                # 按版本号降序排列
+                versions.sort(reverse=True)
+
+                for version in versions:
+                    # 优先使用 x64 版本
+                    for arch in ["x64", "x86"]:
+                        rc_path = os.path.join(sdk_root, version, arch, "rc.exe")
+                        if os.path.exists(rc_path):
+                            return rc_path
+            except Exception:
+                continue
+
+        # 搜索 Visual Studio 安装目录
+        vs_roots = [
+            r"C:\Program Files\Microsoft Visual Studio",
+            r"C:\Program Files (x86)\Microsoft Visual Studio",
+        ]
+
+        for vs_root in vs_roots:
+            if not os.path.exists(vs_root):
+                continue
+
+            try:
+                # 遍历 VS 版本 (2022, 2019, 2017...)
+                for vs_year in sorted(os.listdir(vs_root), reverse=True):
+                    vs_year_path = os.path.join(vs_root, vs_year)
+                    if not os.path.isdir(vs_year_path):
+                        continue
+
+                    # 遍历 VS 版本类型 (Enterprise, Professional, Community, BuildTools)
+                    for edition in os.listdir(vs_year_path):
+                        sdk_bin = os.path.join(vs_year_path, edition, "VC", "Tools", "MSVC")
+                        if not os.path.exists(sdk_bin):
+                            continue
+
+                        # 遍历 MSVC 版本
+                        for msvc_ver in sorted(os.listdir(sdk_bin), reverse=True):
+                            for arch in ["x64", "x86"]:
+                                rc_path = os.path.join(sdk_bin, msvc_ver, "bin", f"Host{arch}", arch, "rc.exe")
+                                if os.path.exists(rc_path):
+                                    return rc_path
+            except Exception:
+                continue
+
+        return None
+
+    def _create_version_info_file(self, config: Dict, output_dir: str) -> Optional[str]:
+        """
+        创建 PyInstaller 版本信息文件
+
+        Args:
+            config: 打包配置，包含 version_info 字段
+            output_dir: 输出目录
+
+        Returns:
+            版本信息文件路径，如果没有配置则返回 None
+        """
+        version_info = config.get("version_info")
+        if not version_info:
+            return None
+
+        # 解析版本号
+        version_str = version_info.get("version", "1.0.0")
+        version_parts = version_str.split(".")
+        while len(version_parts) < 4:
+            version_parts.append("0")
+        version_tuple = tuple(int(p) if p.isdigit() else 0 for p in version_parts[:4])
+
+        # 获取程序名称
+        program_name = config.get("program_name") or Path(config.get("script_path", "app")).stem
+
+        # 创建版本信息文件内容
+        version_info_content = f'''# UTF-8
+#
+# 版本信息文件 - 由 Python打包工具 自动生成
+#
+
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={version_tuple},
+    prodvers={version_tuple},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'080404b0',
+          [
+            StringStruct(u'CompanyName', u'{version_info.get("company_name", "")}'),
+            StringStruct(u'FileDescription', u'{version_info.get("file_description", program_name)}'),
+            StringStruct(u'FileVersion', u'{version_str}'),
+            StringStruct(u'InternalName', u'{program_name}'),
+            StringStruct(u'LegalCopyright', u'{version_info.get("copyright", "")}'),
+            StringStruct(u'OriginalFilename', u'{program_name}.exe'),
+            StringStruct(u'ProductName', u'{version_info.get("product_name", program_name)}'),
+            StringStruct(u'ProductVersion', u'{version_str}'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)
+'''
+
+        # 写入文件
+        version_file_path = os.path.join(output_dir, "version_info.txt")
+        try:
+            with open(version_file_path, "w", encoding="utf-8") as f:
+                f.write(version_info_content)
+            self.log(f"已创建版本信息文件: {version_file_path}")
+            return version_file_path
+        except Exception as e:
+            self.log(f"警告: 创建版本信息文件失败: {str(e)}")
+            return None
+
     def _detect_network_environment(self) -> bool:
         """
         检测当前网络环境是否为国内网络
@@ -327,6 +726,33 @@ class Packager:
             if self.cancel_flag and self.cancel_flag():
                 return False, "打包已取消", None
 
+            # ========== 三层防护机制 ==========
+            # 第一层：动态模块导入追踪
+            enable_dynamic_trace = config.get("enable_dynamic_trace", True)
+            if enable_dynamic_trace:
+                # 检查脚本是否可运行
+                script_runnable = self.dependency_analyzer.check_script_runnable(
+                    script_path, python_path, project_dir
+                )
+
+                if script_runnable:
+                    # 脚本可运行，使用动态追踪（超时10秒，GUI程序会自动跳过）
+                    trace_success, traced_imports = self.dependency_analyzer.trace_dynamic_imports(
+                        script_path, python_path, project_dir, timeout=10
+                    )
+                    if trace_success:
+                        self.log(f"✓ 动态追踪成功，捕获到 {len(traced_imports)} 个模块导入")
+                    # 注意：失败时 trace_dynamic_imports 内部已经输出了日志
+                else:
+                    self.log("⚠️ 脚本无法完整运行，将使用通用策略")
+
+            # 第二层：自动收集未配置库的子模块
+            self.dependency_analyzer.collect_all_unconfigured_submodules(python_path)
+
+            # 检查是否取消
+            if self.cancel_flag and self.cancel_flag():
+                return False, "打包已取消", None
+
             # 6. 确保必要的依赖已安装
             if not venv_exists:
                 self._install_dependencies(python_path, script_path, project_dir, venv_path)
@@ -347,16 +773,68 @@ class Packager:
             if self.cancel_flag and self.cancel_flag():
                 return False, "打包已取消", None
 
-            # 8. 执行打包（带优化）
-            # 根据选择的工具打包
-            if tool == "pyinstaller":
-                success, message = self._package_with_pyinstaller(
-                    python_path, config, output_dir
-                )
-            else:  # nuitka
-                success, message = self._package_with_nuitka(
-                    python_path, config, output_dir
-                )
+            # 8. 执行打包（带优化和失败重试）
+            max_retries = config.get("max_retries", 2)  # 最多重试次数
+            retry_count = 0
+            last_missing_modules = set()
+
+            while retry_count <= max_retries:
+                if retry_count > 0:
+                    self.log("\n" + "=" * 50)
+                    self.log(f"第三层防护：失败重试（第 {retry_count} 次重试）")
+                    self.log("=" * 50)
+
+                # 根据选择的工具打包
+                if tool == "pyinstaller":
+                    success, message = self._package_with_pyinstaller(
+                        python_path, config, output_dir
+                    )
+                else:  # nuitka
+                    success, message = self._package_with_nuitka(
+                        python_path, config, output_dir
+                    )
+
+                # 如果打包成功，测试运行
+                if success and self._last_exe_path:
+                    # 测试运行exe，检测是否有缺失模块
+                    test_success, missing_modules = self._test_exe_for_missing_modules(
+                        self._last_exe_path
+                    )
+
+                    if test_success:
+                        # 运行成功
+                        return success, message, self._last_exe_path
+                    elif missing_modules:
+                        # 检测到缺失模块
+                        if missing_modules == last_missing_modules:
+                            # 和上次一样的模块缺失，说明无法自动修复
+                            self.log(f"⚠️ 无法自动修复缺失的模块: {missing_modules}")
+                            self.log("请手动添加这些模块到隐藏导入列表")
+                            return success, message + f"\n\n⚠️ 警告：检测到可能缺失的模块: {', '.join(missing_modules)}", self._last_exe_path
+
+                        if retry_count < max_retries:
+                            self.log(f"\n检测到缺失模块: {', '.join(missing_modules)}")
+                            self.log("自动添加到隐藏导入列表，准备重新打包...")
+
+                            # 添加缺失模块到动态导入集合
+                            self.dependency_analyzer._dynamic_imports.update(missing_modules)
+
+                            # 记录本次缺失的模块
+                            last_missing_modules = missing_modules
+
+                            retry_count += 1
+                            continue
+                        else:
+                            # 达到最大重试次数
+                            return success, message + f"\n\n⚠️ 警告：检测到可能缺失的模块: {', '.join(missing_modules)}", self._last_exe_path
+                    else:
+                        # 测试失败但没有检测到具体缺失模块
+                        return success, message, self._last_exe_path
+                else:
+                    # 打包失败
+                    return success, message, None
+
+                retry_count += 1
 
             # 如果打包成功，返回 exe 路径用于打开目录
             if success and self._last_exe_path:
@@ -1053,12 +1531,38 @@ class Packager:
 
         if result.returncode == 0:
             self.log(f"✓ {tool} 已安装")
+            # 验证能否导入
+            self.log(f"验证 {tool} 可用性...")
+            verify_result = subprocess.run(
+                [python_path, "-c", f"import {tool}; print({tool}.__version__)"],
+                capture_output=True,
+                text=True,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if verify_result.returncode == 0:
+                version = verify_result.stdout.strip()
+                self.log(f"✓ {tool} 版本: {version}")
+            else:
+                self.log(f"⚠️ 警告: {tool} 已安装但无法导入")
+                self.log(f"错误信息: {verify_result.stderr}")
         else:
             # 未安装，使用多镜像源安装
             self.log(f"安装 {tool}...")
             success = self._pip_install_with_mirrors(python_path, [tool])
             if success:
                 self.log(f"✓ {tool} 安装成功")
+                # 再次验证
+                verify_result = subprocess.run(
+                    [python_path, "-c", f"import {tool}; print({tool}.__version__)"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if verify_result.returncode == 0:
+                    version = verify_result.stdout.strip()
+                    self.log(f"✓ {tool} 验证成功，版本: {version}")
+                else:
+                    self.log(f"⚠️ 警告: {tool} 安装后无法导入")
             else:
                 self.log(f"警告: {tool} 安装失败，尝试使用依赖管理器...")
                 try:
@@ -1078,6 +1582,70 @@ class Packager:
         self.log("\n" + "=" * 50)
         self.log("使用PyInstaller打包（已优化）...")
         self.log("=" * 50)
+
+        # 显示详细的 Python 环境信息
+        self.log("\n=== Python 环境信息 ===")
+        self.log(f"Python 路径: {python_path}")
+
+        # 检查 Python 是否存在
+        if not os.path.exists(python_path):
+            error_msg = f"错误：Python 路径不存在: {python_path}\n"
+            self.log(error_msg)
+            return False, error_msg
+
+        # 显示 Python 版本
+        py_version_result = subprocess.run(
+            [python_path, "--version"],
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if py_version_result.returncode == 0:
+            py_version = py_version_result.stdout.strip() or py_version_result.stderr.strip()
+            self.log(f"Python 版本: {py_version}")
+
+        # 显示 pip 列表（仅显示关键包）
+        self.log("检查已安装的关键包...")
+        pip_list_result = subprocess.run(
+            [python_path, "-m", "pip", "list"],
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if pip_list_result.returncode == 0:
+            pip_output = pip_list_result.stdout
+            for line in pip_output.split('\n'):
+                line_lower = line.lower()
+                if 'pyinstaller' in line_lower or 'setuptools' in line_lower or 'pip' in line_lower:
+                    self.log(f"  {line.strip()}")
+        self.log("=" * 50 + "\n")
+
+        # 最终验证 PyInstaller 是否可用
+        self.log("最终验证 PyInstaller...")
+        verify_cmd = [python_path, "-m", "PyInstaller", "--version"]
+        verify_result = subprocess.run(
+            verify_cmd,
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+        if verify_result.returncode != 0:
+            error_msg = f"PyInstaller 不可用！\n"
+            error_msg += f"Python路径: {python_path}\n"
+            error_msg += f"错误信息: {verify_result.stderr}\n"
+            error_msg += f"\n可能的原因：\n"
+            error_msg += f"1. PyInstaller 未正确安装到虚拟环境\n"
+            error_msg += f"2. 虚拟环境损坏\n"
+            error_msg += f"3. Python环境有问题\n"
+            error_msg += f"\n建议：\n"
+            error_msg += f"- 删除项目目录下的 .venv 或 venv 文件夹\n"
+            error_msg += f"- 重新运行打包，让工具创建新的虚拟环境\n"
+            self.log(error_msg)
+            return False, error_msg
+        else:
+            pyinstaller_version = verify_result.stdout.strip()
+            self.log(f"✓ PyInstaller 可用，版本: {pyinstaller_version}")
 
         script_path = config["script_path"]
         project_dir = config.get("project_dir")
@@ -1100,6 +1668,7 @@ class Packager:
             self.log(f"使用主要 Qt 框架: {qt_framework}")
 
         uses_wx = False
+        uses_tkinter = False
         uses_kivy = False
         uses_flet = False
         uses_customtkinter = False
@@ -1108,6 +1677,17 @@ class Packager:
         uses_toga = False
         uses_textual = False
         uses_pysimplegui = False
+        uses_pygame = False
+        uses_matplotlib = False
+        uses_numpy = False
+        uses_scipy = False
+        uses_pandas = False
+        uses_opencv = False
+        uses_pillow = False
+        uses_sqlalchemy = False
+        uses_cryptography = False
+        uses_requests = False
+        uses_certifi = False
 
         # 使用 AST 精确检测项目中实际导入的模块
         actual_imports = self._detect_actual_imports(script_path, project_dir)
@@ -1126,10 +1706,107 @@ class Packager:
             except:
                 return False
 
+        # 检测模块是真正的包（目录）还是单文件模块
+        def is_real_package(module_name: str) -> bool:
+            """
+            检测一个模块是否是真正的包（有 __path__ 属性）。
+            单文件模块（如 img2pdf.py）不是包，不能使用 --collect-all。
+            """
+            check_code = f'''
+import sys
+import importlib
+try:
+    mod = importlib.import_module("{module_name}")
+    # 真正的包有 __path__ 属性
+    if hasattr(mod, "__path__"):
+        print("package")
+    else:
+        print("module")
+except:
+    print("error")
+'''
+            try:
+                result = subprocess.run(
+                    [python_path, "-c", check_code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                output = result.stdout.strip()
+                return output == "package"
+            except:
+                # 默认假设是包，保守处理
+                return True
+
         # 检测 wxPython（需要实际导入 wx 且包已安装）
         if 'wx' in actual_imports and is_package_installed('wx'):
             uses_wx = True
             self.log(f"检测到 wxPython 框架（已验证安装）")
+
+        # 检测 Tkinter（标准库，不需要验证安装）
+        tkinter_imports = {'tkinter', 'Tkinter', 'ttk', 'tkinter.ttk',
+                          'tkinter.filedialog', 'tkinter.messagebox',
+                          'tkinter.simpledialog', 'tkinter.colorchooser'}
+        if any(imp in actual_imports or imp.startswith('tkinter.') for imp in actual_imports) or \
+           actual_imports & tkinter_imports:
+            uses_tkinter = True
+            self.log(f"检测到 Tkinter 框架")
+
+        # 检测 pygame
+        if 'pygame' in actual_imports and is_package_installed('pygame'):
+            uses_pygame = True
+            self.log(f"检测到 Pygame 框架（已验证安装）")
+
+        # 检测 matplotlib
+        if 'matplotlib' in actual_imports and is_package_installed('matplotlib'):
+            uses_matplotlib = True
+            self.log(f"检测到 Matplotlib 库（已验证安装）")
+
+        # 检测 numpy
+        if 'numpy' in actual_imports and is_package_installed('numpy'):
+            uses_numpy = True
+            self.log(f"检测到 NumPy 库（已验证安装）")
+
+        # 检测 scipy
+        if 'scipy' in actual_imports and is_package_installed('scipy'):
+            uses_scipy = True
+            self.log(f"检测到 SciPy 库（已验证安装）")
+
+        # 检测 pandas
+        if 'pandas' in actual_imports and is_package_installed('pandas'):
+            uses_pandas = True
+            self.log(f"检测到 Pandas 库（已验证安装）")
+
+        # 检测 opencv
+        if 'cv2' in actual_imports and is_package_installed('cv2'):
+            uses_opencv = True
+            self.log(f"检测到 OpenCV 库（已验证安装）")
+
+        # 检测 PIL/Pillow
+        if ('PIL' in actual_imports or 'pillow' in actual_imports) and is_package_installed('PIL'):
+            uses_pillow = True
+            self.log(f"检测到 Pillow 库（已验证安装）")
+
+        # 检测 sqlalchemy
+        if 'sqlalchemy' in actual_imports and is_package_installed('sqlalchemy'):
+            uses_sqlalchemy = True
+            self.log(f"检测到 SQLAlchemy 库（已验证安装）")
+
+        # 检测 cryptography
+        if 'cryptography' in actual_imports and is_package_installed('cryptography'):
+            uses_cryptography = True
+            self.log(f"检测到 Cryptography 库（已验证安装）")
+
+        # 检测 requests
+        if 'requests' in actual_imports and is_package_installed('requests'):
+            uses_requests = True
+            self.log(f"检测到 Requests 库（已验证安装）")
+
+        # 检测 certifi（SSL证书库，需要包含数据文件）
+        if 'certifi' in actual_imports and is_package_installed('certifi'):
+            uses_certifi = True
+            self.log(f"检测到 Certifi 库（已验证安装）")
 
         # 检测其他 GUI 框架（需要实际导入且包已安装）
         if 'kivy' in actual_imports and is_package_installed('kivy'):
@@ -1173,6 +1850,10 @@ class Packager:
             self.dependency_analyzer.get_optimization_suggestions(python_path)
         )
 
+        # 确保排除打包工具本身及其子模块（防止PyInstaller编译失败）
+        packaging_tools = {'pyinstaller', 'nuitka', 'PyInstaller'}
+        exclude_modules = list(set(exclude_modules) | packaging_tools)
+
         # 获取需要排除的冲突 Qt 绑定（避免 PyInstaller 多 Qt 绑定错误）
         qt_exclusions = self.dependency_analyzer.get_qt_exclusion_list()
         if qt_exclusions:
@@ -1190,6 +1871,7 @@ class Packager:
             self.log(f"\n使用自动分析的排除模块（共 {len(exclude_modules)} 个）")
 
         # 构建PyInstaller命令
+        self.log("\n=== 开始构建 PyInstaller 命令 ===")
         cmd = [python_path, "-m", "PyInstaller"]
 
         # 单文件模式
@@ -1285,8 +1967,19 @@ class Packager:
 
         # 添加隐藏导入
         if hidden_imports:
-            self.log(f"应用优化: 添加 {len(hidden_imports)} 个隐藏导入")
-            for module in hidden_imports:
+            # 过滤掉打包工具本身（pyinstaller 和 nuitka）及其所有子模块
+            def should_include_module(module_name):
+                # 精确匹配打包工具名
+                if module_name in {'pyinstaller', 'nuitka', 'PyInstaller'}:
+                    return False
+                # 排除打包工具的所有子模块
+                if module_name.startswith(('pyinstaller.', 'nuitka.', 'PyInstaller.')):
+                    return False
+                return True
+
+            filtered_imports = [m for m in hidden_imports if should_include_module(m)]
+            self.log(f"应用优化: 添加 {len(filtered_imports)} 个隐藏导入")
+            for module in filtered_imports:
                 cmd.extend(["--hidden-import", module])
 
         # 重要：添加原始脚本分析到的所有依赖作为隐藏导入
@@ -1331,6 +2024,83 @@ class Packager:
                 added_deps.append(module_name)
             if added_deps:
                 self.log(f"  已添加 {len(added_deps)} 个依赖: {', '.join(sorted(added_deps)[:10])}{'...' if len(added_deps) > 10 else ''}")
+
+        # ========== 增强Analysis阶段：对未配置的库使用完整收集 ==========
+        # 增强Analysis阶段：对未配置的库使用完整收集
+        unconfigured_libs = self.dependency_analyzer._unconfigured_libraries
+        if unconfigured_libs:
+            # 过滤掉打包工具本身（排除 pyinstaller 和 nuitka）
+            def should_collect_lib(lib_name):
+                lib_lower = lib_name.lower()
+                if lib_lower in {'pyinstaller', 'nuitka'}:
+                    return False
+                return True
+
+            filtered_libs = [lib for lib in unconfigured_libs if should_collect_lib(lib)]
+            if filtered_libs:
+                self.log(f"\n增强Analysis阶段: 对 {len(filtered_libs)} 个未配置的库使用完整收集")
+            else:
+                self.log(f"\n增强Analysis阶段: 未发现需要收集的库（已过滤打包工具）")
+        if unconfigured_libs:
+            filtered_libs = [lib for lib in unconfigured_libs if lib.lower() not in {'pyinstaller', 'nuitka'}]
+            for lib in sorted(filtered_libs):
+                # 先检测是否是真正的包（目录）还是单文件模块
+                if is_real_package(lib):
+                    # 真正的包：使用 --collect-all 收集所有数据和子模块
+                    # 注意：这可能会增加包体积，但能确保所有依赖都被包含
+                    self.log(f"  收集 {lib} 的所有资源（包）...")
+                    cmd.extend(["--collect-all", lib])
+                else:
+                    # 单文件模块：使用 --hidden-import
+                    self.log(f"  收集 {lib}（单文件模块）...")
+                    cmd.extend(["--hidden-import", lib])
+            self.log(f"  ✓ 已为未配置的库启用完整收集模式")
+
+        # 添加自动收集到的子模块
+        auto_collected = self.dependency_analyzer._auto_collected_modules
+        if auto_collected:
+            self.log(f"\n添加自动收集的子模块...")
+            added_count = 0
+            for lib, submodules in auto_collected.items():
+                # 跳过打包工具本身（所有变体）
+                lib_lower = lib.lower()
+                if lib_lower in {'pyinstaller', 'nuitka'}:
+                    continue
+                for submodule in submodules:
+                    # 跳过打包工具的所有子模块（所有变体）
+                    if (submodule.startswith(('pyinstaller.', 'nuitka.', 'PyInstaller.')) or
+                        submodule.lower().startswith(('pyinstaller.', 'nuitka.'))):
+                        continue
+                    if submodule not in hidden_imports and submodule not in added_deps:
+                        cmd.extend(["--hidden-import", submodule])
+                        added_count += 1
+            if added_count > 0:
+                self.log(f"  已添加 {added_count} 个自动收集的子模块")
+
+        # 添加动态追踪到的导入
+        dynamic_imports = self.dependency_analyzer._dynamic_imports
+        if dynamic_imports:
+            self.log(f"\n添加动态追踪到的导入...")
+            added_dynamic = 0
+            for imp in dynamic_imports:
+                # 跳过已添加的
+                if imp in hidden_imports or imp in added_deps:
+                    continue
+                # 跳过标准库
+                root_module = imp.split('.')[0]
+                if self.dependency_analyzer._is_stdlib(root_module):
+                    continue
+                # 跳过打包工具本身（所有变体）
+                root_lower = root_module.lower()
+                if root_lower in {'pyinstaller', 'nuitka'}:
+                    continue
+                # 跳过打包工具的子模块
+                if imp.lower().startswith(('pyinstaller.', 'nuitka.')):
+                    continue
+                cmd.extend(["--hidden-import", imp])
+                added_dynamic += 1
+            if added_dynamic > 0:
+                self.log(f"  已添加 {added_dynamic} 个动态追踪到的导入")
 
         # 添加 Qt 插件支持（修复暗黑模式显示问题）
         if qt_framework:
@@ -1528,6 +2298,123 @@ class Packager:
             cmd.extend(["--hidden-import", "wx.lib"])
             self.log("已配置 wxPython 框架支持")
 
+        # ========== Tkinter 支持 ==========
+        if uses_tkinter:
+            self.log(f"\n配置 Tkinter 框架支持...")
+            cmd.extend(["--hidden-import", "tkinter"])
+            cmd.extend(["--hidden-import", "tkinter.ttk"])
+            cmd.extend(["--hidden-import", "tkinter.filedialog"])
+            cmd.extend(["--hidden-import", "tkinter.messagebox"])
+            cmd.extend(["--hidden-import", "tkinter.simpledialog"])
+            cmd.extend(["--hidden-import", "tkinter.colorchooser"])
+            cmd.extend(["--hidden-import", "_tkinter"])
+            self.log("已配置 Tkinter 框架支持")
+
+        # ========== Pygame 支持 ==========
+        if uses_pygame:
+            self.log(f"\n配置 Pygame 框架支持...")
+            cmd.extend(["--collect-all", "pygame"])
+            self.log("已配置 Pygame 框架支持")
+
+        # ========== Matplotlib 支持 ==========
+        if uses_matplotlib:
+            self.log(f"\n配置 Matplotlib 库支持...")
+            cmd.extend(["--collect-all", "matplotlib"])
+            cmd.extend(["--hidden-import", "matplotlib.backends.backend_tkagg"])
+            cmd.extend(["--hidden-import", "matplotlib.backends.backend_agg"])
+            cmd.extend(["--hidden-import", "matplotlib.figure"])
+            cmd.extend(["--hidden-import", "PIL"])
+            cmd.extend(["--hidden-import", "PIL.Image"])
+            self.log("已配置 Matplotlib 库支持")
+
+        # ========== NumPy 支持 ==========
+        if uses_numpy:
+            self.log(f"\n配置 NumPy 库支持...")
+            cmd.extend(["--collect-all", "numpy"])
+            cmd.extend(["--hidden-import", "numpy.core._multiarray_umath"])
+            cmd.extend(["--hidden-import", "numpy.core._dtype_ctypes"])
+            cmd.extend(["--hidden-import", "numpy.random.common"])
+            cmd.extend(["--hidden-import", "numpy.random.bounded_integers"])
+            cmd.extend(["--hidden-import", "numpy.random.entropy"])
+            cmd.extend(["--hidden-import", "numpy.random.mtrand"])
+            self.log("已配置 NumPy 库支持")
+
+        # ========== SciPy 支持 ==========
+        if uses_scipy:
+            self.log(f"\n配置 SciPy 库支持...")
+            cmd.extend(["--collect-all", "scipy"])
+            cmd.extend(["--hidden-import", "scipy.integrate"])
+            cmd.extend(["--hidden-import", "scipy.optimize"])
+            cmd.extend(["--hidden-import", "scipy.linalg"])
+            cmd.extend(["--hidden-import", "scipy.sparse"])
+            cmd.extend(["--hidden-import", "scipy.special"])
+            self.log("已配置 SciPy 库支持")
+
+        # ========== Pandas 支持 ==========
+        if uses_pandas:
+            self.log(f"\n配置 Pandas 库支持...")
+            cmd.extend(["--collect-all", "pandas"])
+            cmd.extend(["--hidden-import", "pandas._libs"])
+            cmd.extend(["--hidden-import", "pandas._libs.tslibs"])
+            cmd.extend(["--hidden-import", "pandas._libs.tslibs.np_datetime"])
+            cmd.extend(["--hidden-import", "pandas._libs.tslibs.nattype"])
+            cmd.extend(["--hidden-import", "pandas._libs.tslibs.timedeltas"])
+            self.log("已配置 Pandas 库支持")
+
+        # ========== OpenCV 支持 ==========
+        if uses_opencv:
+            self.log(f"\n配置 OpenCV 库支持...")
+            cmd.extend(["--collect-all", "cv2"])
+            cmd.extend(["--hidden-import", "cv2"])
+            cmd.extend(["--hidden-import", "numpy"])
+            cmd.extend(["--hidden-import", "numpy.core._multiarray_umath"])
+            self.log("已配置 OpenCV 库支持")
+
+        # ========== Pillow 支持 ==========
+        if uses_pillow:
+            self.log(f"\n配置 Pillow 库支持...")
+            cmd.extend(["--collect-all", "PIL"])
+            cmd.extend(["--hidden-import", "PIL._tkinter_finder"])
+            cmd.extend(["--hidden-import", "PIL._imaging"])
+            self.log("已配置 Pillow 库支持")
+
+        # ========== SQLAlchemy 支持 ==========
+        if uses_sqlalchemy:
+            self.log(f"\n配置 SQLAlchemy 库支持...")
+            cmd.extend(["--collect-all", "sqlalchemy"])
+            cmd.extend(["--hidden-import", "sqlalchemy.dialects.sqlite"])
+            cmd.extend(["--hidden-import", "sqlalchemy.dialects.mysql"])
+            cmd.extend(["--hidden-import", "sqlalchemy.dialects.postgresql"])
+            cmd.extend(["--hidden-import", "sqlalchemy.sql.default_comparator"])
+            self.log("已配置 SQLAlchemy 库支持")
+
+        # ========== Cryptography 支持 ==========
+        if uses_cryptography:
+            self.log(f"\n配置 Cryptography 库支持...")
+            cmd.extend(["--collect-all", "cryptography"])
+            cmd.extend(["--hidden-import", "cryptography.hazmat.backends.openssl"])
+            cmd.extend(["--hidden-import", "cryptography.hazmat.bindings._rust"])
+            cmd.extend(["--hidden-import", "_cffi_backend"])
+            self.log("已配置 Cryptography 库支持")
+
+        # ========== Requests 支持 ==========
+        if uses_requests:
+            self.log(f"\n配置 Requests 库支持...")
+            cmd.extend(["--collect-all", "requests"])
+            cmd.extend(["--hidden-import", "urllib3"])
+            cmd.extend(["--hidden-import", "charset_normalizer"])
+            cmd.extend(["--hidden-import", "idna"])
+            # requests 依赖 certifi，确保包含
+            if not uses_certifi:
+                cmd.extend(["--collect-all", "certifi"])
+                self.log("  已自动包含 certifi（SSL证书）")
+            self.log("已配置 Requests 库支持")
+
+        # ========== Certifi 支持（SSL证书数据文件）==========
+        if uses_certifi:
+            self.log(f"\n配置 Certifi 库支持...")
+            cmd.extend(["--collect-all", "certifi"])
+            self.log("已配置 Certifi 库支持（包含CA证书）")
 
         # 输出目录
         cmd.extend(["--distpath", output_dir])
@@ -1751,6 +2638,19 @@ _setup_icon()
 
         # 指定输出文件名（使用临时名称避免中文编码问题）
         cmd.extend(["--name", build_name])
+
+        # 版权信息（版本信息文件）
+        version_info = config.get("version_info")
+        if version_info:
+            self.log("\n添加版权信息...")
+            version_file = self._create_version_info_file(config, output_dir)
+            if version_file:
+                cmd.extend(["--version-file", version_file])
+                self.log(f"  产品名称: {version_info.get('product_name', 'N/A')}")
+                self.log(f"  公司名称: {version_info.get('company_name', 'N/A')}")
+                self.log(f"  文件描述: {version_info.get('file_description', 'N/A')}")
+                self.log(f"  版权信息: {version_info.get('copyright', 'N/A')}")
+                self.log(f"  版本号: {version_info.get('version', '1.0.0')}")
 
         # Python优化
         if config.get("python_opt", True):
@@ -2009,6 +2909,159 @@ _setup_icon()
 
             return False, error_msg
 
+    def _test_exe_for_missing_modules(
+        self,
+        exe_path: str,
+        timeout: int = 10
+    ) -> Tuple[bool, Set[str]]:
+        """
+        测试exe运行，检测是否有缺失的模块
+
+        改进：使用 Popen 启动进程，快速检测启动状态，
+        如果进程正常启动则立即返回，无需等待超时。
+
+        Args:
+            exe_path: exe文件路径
+            timeout: 最大等待时间（秒），仅作为安全上限
+
+        Returns:
+            (运行成功, 缺失的模块集合)
+        """
+        self.log("\n" + "=" * 50)
+        self.log("第三层防护：打包后自动测试")
+        self.log("=" * 50)
+        self.log(f"测试运行: {exe_path}")
+
+        if not os.path.exists(exe_path):
+            self.log("⚠️ exe文件不存在，跳过测试")
+            return True, set()
+
+        missing_modules = set()
+        process = None
+
+        try:
+            import time
+
+            # 使用 Popen 启动进程，不阻塞等待
+            process = subprocess.Popen(
+                [exe_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            self.log("正在检测程序启动状态...")
+
+            # 短暂等待，检查进程是否立即崩溃（通常是模块缺失导致）
+            # 分多次检查，每次间隔较短，总时间不超过3秒
+            check_interval = 0.3  # 每次检查间隔
+            max_checks = 10  # 最多检查次数（总共3秒）
+            collected_output = ""
+
+            for i in range(max_checks):
+                time.sleep(check_interval)
+
+                # 检查进程是否还在运行
+                poll_result = process.poll()
+
+                if poll_result is not None:
+                    # 进程已结束，获取输出
+                    stdout, stderr = process.communicate()
+                    collected_output = (stdout or "") + (stderr or "")
+
+                    # 检查是否有模块缺失错误
+                    if "ModuleNotFoundError" in collected_output or "No module named" in collected_output:
+                        missing_modules = self._parse_missing_modules(collected_output)
+                        if missing_modules:
+                            self.log(f"✗ 检测到缺失模块: {', '.join(sorted(missing_modules))}")
+                            return False, missing_modules
+                        else:
+                            self.log("⚠️ 检测到模块错误但无法解析具体模块名")
+                            return False, set()
+
+                    # 进程正常退出
+                    if poll_result == 0:
+                        self.log(f"✓ exe运行测试通过（程序正常退出，耗时 {(i+1)*check_interval:.1f}秒）")
+                        return True, set()
+                    else:
+                        # 非零返回码，检查是否有严重错误
+                        if "Error" not in collected_output and "Exception" not in collected_output:
+                            self.log(f"✓ exe可以启动（返回码 {poll_result}，可能是正常情况）")
+                            return True, set()
+                        else:
+                            self.log(f"⚠️ exe运行出错，返回码: {poll_result}")
+                            if collected_output:
+                                preview = collected_output[:500]
+                                self.log(f"输出预览: {preview}")
+                            return True, set()  # 不认为是模块缺失问题
+
+            # 进程仍在运行，说明启动成功（GUI程序或长时间运行的服务）
+            self.log(f"✓ exe启动成功（程序正常运行中，检测耗时 {max_checks*check_interval:.1f}秒）")
+
+            # 终止测试进程
+            try:
+                process.terminate()
+                process.wait(timeout=2)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+
+            return True, set()
+
+        except FileNotFoundError:
+            self.log("⚠️ exe文件不存在或无法执行")
+            return True, set()
+        except Exception as e:
+            self.log(f"⚠️ 测试过程出错: {str(e)}")
+            return True, set()  # 出错时不阻止流程
+        finally:
+            # 确保进程被清理
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+
+    def _parse_missing_modules(self, output: str) -> Set[str]:
+        """
+        从输出中解析缺失的模块名
+
+        Args:
+            output: 程序输出内容
+
+        Returns:
+            缺失的模块名集合
+        """
+        import re
+
+        missing_modules = set()
+
+        # 匹配模式: No module named 'xxx' 或 ModuleNotFoundError: No module named 'xxx'
+        patterns = [
+            r"No module named ['\"]([^'\"]+)['\"]",
+            r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]",
+            r"ImportError: No module named ['\"]([^'\"]+)['\"]",
+        ]
+
+        for pattern in patterns:
+            matches = re.findall(pattern, output)
+            for match in matches:
+                # 获取根模块名
+                root_module = match.split('.')[0]
+                missing_modules.add(match)
+                if root_module != match:
+                    missing_modules.add(root_module)
+
+        return missing_modules
+
     def _package_with_nuitka(
         self, python_path: str, config: Dict, output_dir: str
     ) -> Tuple[bool, str]:
@@ -2038,6 +3091,7 @@ _setup_icon()
             self.log(f"使用主要 Qt 框架: {qt_framework}")
 
         uses_wx = False
+        uses_tkinter = False
         uses_kivy = False
         uses_flet = False
         uses_customtkinter = False
@@ -2046,6 +3100,17 @@ _setup_icon()
         uses_toga = False
         uses_textual = False
         uses_pysimplegui = False
+        uses_pygame = False
+        uses_matplotlib = False
+        uses_numpy = False
+        uses_scipy = False
+        uses_pandas = False
+        uses_opencv = False
+        uses_pillow = False
+        uses_sqlalchemy = False
+        uses_cryptography = False
+        uses_requests = False
+        uses_certifi = False
 
         # 使用 AST 精确检测项目中实际导入的模块
         actual_imports = self._detect_actual_imports(script_path, project_dir)
@@ -2064,10 +3129,52 @@ _setup_icon()
             except:
                 return False
 
+        # 检测模块是真正的包（目录）还是单文件模块
+        def is_real_package(module_name: str) -> bool:
+            """
+            检测一个模块是否是真正的包（有 __path__ 属性）。
+            单文件模块（如 img2pdf.py）不是包，不能使用 --include-package。
+            """
+            check_code = f'''
+import sys
+import importlib
+try:
+    mod = importlib.import_module("{module_name}")
+    # 真正的包有 __path__ 属性
+    if hasattr(mod, "__path__"):
+        print("package")
+    else:
+        print("module")
+except:
+    print("error")
+'''
+            try:
+                result = subprocess.run(
+                    [python_path, "-c", check_code],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                )
+                output = result.stdout.strip()
+                return output == "package"
+            except:
+                # 默认假设是包，保守处理
+                return True
+
         # 检测 wxPython（需要实际导入 wx 且包已安装）
         if 'wx' in actual_imports and is_package_installed('wx'):
             uses_wx = True
             self.log(f"检测到 wxPython 框架（已验证安装）")
+
+        # 检测 Tkinter（标准库，不需要验证安装）
+        tkinter_imports = {'tkinter', 'Tkinter', 'ttk', 'tkinter.ttk',
+                          'tkinter.filedialog', 'tkinter.messagebox',
+                          'tkinter.simpledialog', 'tkinter.colorchooser'}
+        if any(imp in actual_imports or imp.startswith('tkinter.') for imp in actual_imports) or \
+           actual_imports & tkinter_imports:
+            uses_tkinter = True
+            self.log(f"检测到 Tkinter 框架")
 
         # 检测其他 GUI 框架（需要实际导入且包已安装）
         if 'kivy' in actual_imports and is_package_installed('kivy'):
@@ -2095,6 +3202,61 @@ _setup_icon()
             uses_pysimplegui = True
             self.log(f"检测到 PySimpleGUI 框架（已验证安装）")
 
+        # 检测 pygame
+        if 'pygame' in actual_imports and is_package_installed('pygame'):
+            uses_pygame = True
+            self.log(f"检测到 Pygame 框架（已验证安装）")
+
+        # 检测 matplotlib
+        if 'matplotlib' in actual_imports and is_package_installed('matplotlib'):
+            uses_matplotlib = True
+            self.log(f"检测到 Matplotlib 库（已验证安装）")
+
+        # 检测 numpy
+        if 'numpy' in actual_imports and is_package_installed('numpy'):
+            uses_numpy = True
+            self.log(f"检测到 NumPy 库（已验证安装）")
+
+        # 检测 scipy
+        if 'scipy' in actual_imports and is_package_installed('scipy'):
+            uses_scipy = True
+            self.log(f"检测到 SciPy 库（已验证安装）")
+
+        # 检测 pandas
+        if 'pandas' in actual_imports and is_package_installed('pandas'):
+            uses_pandas = True
+            self.log(f"检测到 Pandas 库（已验证安装）")
+
+        # 检测 opencv
+        if 'cv2' in actual_imports and is_package_installed('cv2'):
+            uses_opencv = True
+            self.log(f"检测到 OpenCV 库（已验证安装）")
+
+        # 检测 PIL/Pillow
+        if ('PIL' in actual_imports or 'pillow' in actual_imports) and is_package_installed('PIL'):
+            uses_pillow = True
+            self.log(f"检测到 Pillow 库（已验证安装）")
+
+        # 检测 sqlalchemy
+        if 'sqlalchemy' in actual_imports and is_package_installed('sqlalchemy'):
+            uses_sqlalchemy = True
+            self.log(f"检测到 SQLAlchemy 库（已验证安装）")
+
+        # 检测 cryptography
+        if 'cryptography' in actual_imports and is_package_installed('cryptography'):
+            uses_cryptography = True
+            self.log(f"检测到 Cryptography 库（已验证安装）")
+
+        # 检测 requests
+        if 'requests' in actual_imports and is_package_installed('requests'):
+            uses_requests = True
+            self.log(f"检测到 Requests 库（已验证安装）")
+
+        # 检测 certifi（SSL证书库，需要包含数据文件）
+        if 'certifi' in actual_imports and is_package_installed('certifi'):
+            uses_certifi = True
+            self.log(f"检测到 Certifi 库（已验证安装）")
+
         # 检测中文字符，使用临时英文名避免编码问题
         has_chinese = any('\u4e00' <= char <= '\u9fff' for char in script_name)
         temp_name = None
@@ -2110,6 +3272,10 @@ _setup_icon()
         exclude_modules, hidden_imports, _ = (
             self.dependency_analyzer.get_optimization_suggestions(python_path)
         )
+
+        # 确保排除打包工具本身及其子模块（防止Nuitka编译失败）
+        packaging_tools = {'pyinstaller', 'nuitka', 'PyInstaller'}
+        exclude_modules = list(set(exclude_modules) | packaging_tools)
 
         # 获取需要排除的冲突 Qt 绑定（避免 Nuitka 多 Qt 绑定问题）
         qt_exclusions = self.dependency_analyzer.get_qt_exclusion_list()
@@ -2165,11 +3331,11 @@ _setup_icon()
         # 指定输出文件名（使用 = 连接参数和值，使用临时名称避免中文编码问题）
         cmd.append(f"--output-filename={build_name}.exe")
 
-        # 单文件模式
+        # 单文件模式（使用 --mode 参数，兼容 Nuitka 2.8.9+）
         if config.get("onefile", True):
-            cmd.append("--onefile")
+            cmd.append("--mode=onefile")
         else:
-            cmd.append("--standalone")
+            cmd.append("--mode=standalone")
 
         # 控制台窗口（使用新的参数格式）
         if not config.get("console", False):
@@ -2188,27 +3354,198 @@ _setup_icon()
                 else:
                     icon_path = os.path.join(os.path.dirname(script_path), icon_path)
 
-            # 检查图标文件是否存在
-            if os.path.exists(icon_path):
-                self.log(f"\n" + "=" * 50)
-                self.log("处理图标文件...")
-                self.log("=" * 50)
-                self.log(f"使用图标: {icon_path}")
-
-                # 直接使用原始图标文件（与 1.bat 一致）
-                # Nuitka使用--windows-icon-from-ico参数，会自动嵌入到exe资源中
-                cmd.append(f"--windows-icon-from-ico={icon_path}")
-
-                # 添加图标为数据文件（固定名称为 icon.ico，与常见项目约定一致）
-                cmd.append(f"--include-data-file={icon_path}=icon.ico")
-                self.log(f"已添加图标数据文件: icon.ico")
-            else:
+            # 验证图标文件存在
+            if not os.path.exists(icon_path):
                 self.log(f"警告: 图标文件不存在: {icon_path}")
+                icon_path = None  # 重置为 None，后续逻辑会跳过
+
+        # 版权信息处理
+        # 由于 MSVC 编译器在命令行中处理中文字符会导致编码错误(C4819, C2001)，
+        # 当检测到中文字符时，创建 Windows 资源文件(.rc)并编译为 .res 文件
+        version_info = config.get("version_info")
+        use_rc_file = False  # 标记是否使用了资源文件
+
+        if version_info:
+            self.log("\n添加版权信息...")
+            product_name = version_info.get("product_name", "") or script_name
+            company_name = version_info.get("company_name", "")
+            file_description = version_info.get("file_description", "") or script_name
+            copyright_text = version_info.get("copyright", "")
+            version_str = version_info.get("version", "1.0.0")
+
+            # 检测是否包含非 ASCII 字符（中文等）
+            def has_non_ascii(text):
+                if not text:
+                    return False
+                try:
+                    text.encode('ascii')
+                    return False
+                except UnicodeEncodeError:
+                    return True
+
+            any_chinese = any(has_non_ascii(v) for v in [product_name, company_name, file_description, copyright_text])
+
+            if any_chinese:
+                # 使用 Windows 资源文件方式处理中文版本信息
+                # 检测Nuitka版本以决定是否支持 --windows-force-rc-file
+                nuitka_version = None
+                try:
+                    result = subprocess.run(
+                        [python_path, "-m", "nuitka", "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode == 0:
+                        # 提取版本号，格式如 "2.8.9" 或 "2.9.0"
+                        import re
+                        version_match = re.search(r'(\d+)\.(\d+)\.(\d+)', result.stdout)
+                        if version_match:
+                            major = int(version_match.group(1))
+                            minor = int(version_match.group(2))
+                            nuitka_version = (major, minor)
+                            self.log(f"检测到 Nuitka 版本: {major}.{minor}")
+                except:
+                    pass
+
+                # Nuitka 2.9+ 支持 --windows-force-rc-file
+                supports_rc_file = nuitka_version and nuitka_version >= (2, 9)
+
+                if supports_rc_file:
+                    self.log("Nuitka 2.9+ 检测到，将尝试创建资源文件...")
+                    res_file = self._create_version_resource_file(
+                        output_dir=output_dir,
+                        script_name=script_name,
+                        product_name=product_name,
+                        company_name=company_name,
+                        file_description=file_description,
+                        copyright_text=copyright_text,
+                        version_str=version_str,
+                        icon_path=icon_path if icon_path and os.path.exists(icon_path) else None
+                    )
+
+                    if res_file and os.path.exists(res_file):
+                        # 使用 Nuitka 的 --windows-force-rc-file 参数
+                        cmd.append(f"--windows-force-rc-file={res_file}")
+                        use_rc_file = True  # 标记已使用资源文件
+                        self.log(f"  ✓ 已创建并编译资源文件: {res_file}")
+                        self.log(f"  ✓ 产品名称: {product_name}")
+                        self.log(f"  ✓ 公司名称: {company_name}")
+                        self.log(f"  ✓ 文件描述: {file_description}")
+                        self.log(f"  ✓ 版权信息: {copyright_text}")
+                        self.log(f"  ✓ 版本号: {version_str}")
+                        if icon_path:
+                            self.log(f"  ✓ 图标已包含在资源文件中")
+                        # 版本号只包含数字和点，可以安全传递
+                        if version_str:
+                            cmd.append(f"--product-version={version_str}")
+                            cmd.append(f"--file-version={version_str}")
+                    else:
+                        self.log("⚠️  资源文件创建失败，将使用命令行参数")
+                        # 回退到命令行参数（即使是中文，也尝试写入）
+                        self._add_version_info_cmdline(cmd, product_name, company_name,
+                                                       file_description, copyright_text, version_str)
+                else:
+                    # Nuitka 2.8.x 不支持 --windows-force-rc-file
+                    self.log("检测到 Nuitka 2.8.x，不支持 --windows-force-rc-file")
+                    self.log("⚠️  将使用命令行参数设置版本信息（中文可尝试写入）")
+                    self.log("⚠️  建议升级到 Nuitka 2.9+ 以获得完整中文支持")
+                    # 使用命令行参数写入元信息（尝试中文）
+                    self._add_version_info_cmdline(cmd, product_name, company_name,
+                                                   file_description, copyright_text, version_str)
+            else:
+                # 没有中文字符，直接使用命令行参数
+                self._add_version_info_cmdline(cmd, product_name, company_name,
+                                               file_description, copyright_text, version_str)
+
+        # 处理图标（仅在未使用资源文件时）
+        # 如果使用了资源文件，图标已经包含在其中，不需要再单独添加
+        if icon_path and os.path.exists(icon_path) and not use_rc_file:
+            self.log(f"\n" + "=" * 50)
+            self.log("处理图标文件...")
+            self.log("=" * 50)
+            self.log(f"使用图标: {icon_path}")
+
+            # 直接使用原始图标文件（与 1.bat 一致）
+            # Nuitka使用--windows-icon-from-ico参数，会自动嵌入到exe资源中
+            cmd.append(f"--windows-icon-from-ico={icon_path}")
+
+            # 添加图标为数据文件到根目录（固定名称为 icon.ico）
+            cmd.append(f"--include-data-file={icon_path}=icon.ico")
+            self.log(f"已添加图标数据文件: icon.ico")
+
+            # 同时保持原始目录结构（兼容从 resources/icons/icon.ico 加载的代码）
+            icon_dir = os.path.dirname(icon_path)
+            if icon_dir and os.path.exists(icon_dir):
+                # 检查是否是 resources/icons 目录结构
+                icon_dir_name = os.path.basename(icon_dir)
+                parent_dir = os.path.dirname(icon_dir)
+                parent_dir_name = os.path.basename(parent_dir) if parent_dir else ""
+
+                if icon_dir_name == "icons" and parent_dir_name == "resources":
+                    # 包含整个 resources 目录以保持目录结构
+                    resources_dir = parent_dir
+                    if os.path.exists(resources_dir):
+                        cmd.append(f"--include-data-dir={resources_dir}=resources")
+                        self.log(f"已添加资源目录: resources/")
+        elif icon_path and os.path.exists(icon_path) and use_rc_file:
+            # 资源文件已包含图标，只添加图标为数据文件（供应用程序内部使用）
+            cmd.append(f"--include-data-file={icon_path}=icon.ico")
+            self.log(f"已添加图标数据文件: icon.ico (图标资源已在 .res 中)")
+
+            # 同时保持原始目录结构
+            icon_dir = os.path.dirname(icon_path)
+            if icon_dir and os.path.exists(icon_dir):
+                icon_dir_name = os.path.basename(icon_dir)
+                parent_dir = os.path.dirname(icon_dir)
+                parent_dir_name = os.path.basename(parent_dir) if parent_dir else ""
+
+                if icon_dir_name == "icons" and parent_dir_name == "resources":
+                    resources_dir = parent_dir
+                    if os.path.exists(resources_dir):
+                        cmd.append(f"--include-data-dir={resources_dir}=resources")
+                        self.log(f"已添加资源目录: resources/")
 
         # 添加排除模块（优化）
-        if exclude_modules:
-            self.log(f"\n应用优化: 排除 {len(exclude_modules)} 个不必要的模块")
-            for module in exclude_modules:
+        # 额外添加更多应排除的大型/不必要模块（与 build_universal.bat 一致）
+        extra_exclude_modules = {
+            # 测试框架
+            'pytest', 'unittest', 'doctest', 'coverage', 'nose', 'mock', 'tox',
+            # 开发工具
+            'sphinx', 'docutils', 'IPython', 'jupyter', 'notebook', 'ipython', 'ipykernel',
+            # 大型科学计算库（通常不需要）
+            'matplotlib', 'seaborn', 'pandas', 'numpy', 'scipy', 'sklearn',
+            'tensorflow', 'torch', 'cv2', 'opencv',
+            # GUI 框架冲突（已由 Qt 排除处理，这里再次确认）
+            'tkinter', 'wxpy', 'wxpython', 'PyQt4', 'PySide', 'PyQt5', 'PySide2', 'PySide6',
+            # 其他
+            'polib', 'distutils', 'pkg_resources',
+        }
+
+        # 根据实际使用情况，从排除列表中移除需要的模块
+        if uses_tkinter or uses_customtkinter:
+            extra_exclude_modules.discard('tkinter')
+        if uses_pillow:
+            extra_exclude_modules.discard('PIL')
+            extra_exclude_modules.discard('pillow')
+        if uses_matplotlib:
+            extra_exclude_modules.discard('matplotlib')
+        if uses_numpy:
+            extra_exclude_modules.discard('numpy')
+        if uses_scipy:
+            extra_exclude_modules.discard('scipy')
+        if uses_pandas:
+            extra_exclude_modules.discard('pandas')
+        if uses_opencv:
+            extra_exclude_modules.discard('cv2')
+            extra_exclude_modules.discard('opencv')
+
+        all_exclude_modules = set(exclude_modules) | extra_exclude_modules
+
+        if all_exclude_modules:
+            self.log(f"\n应用优化: 排除 {len(all_exclude_modules)} 个不必要的模块")
+            for module in all_exclude_modules:
                 # Nuitka使用不同的排除语法
                 if not module.startswith("*"):
                     cmd.append(f"--nofollow-import-to={module}")
@@ -2216,9 +3553,93 @@ _setup_icon()
         # 添加包含模块（如果需要）
         # 注意：不自动添加所有依赖，让 Nuitka 自动分析，避免打包不必要的模块导致文件过大
         if hidden_imports:
-            self.log(f"应用优化: 包含 {len(hidden_imports)} 个必要模块")
-            for module in hidden_imports:
+            # 过滤掉打包工具本身（pyinstaller 和 nuitka）及其所有子模块
+            def should_include_module(module_name):
+                # 精确匹配打包工具名
+                if module_name in {'pyinstaller', 'nuitka', 'PyInstaller'}:
+                    return False
+                # 排除打包工具的所有子模块
+                if module_name.startswith(('pyinstaller.', 'nuitka.', 'PyInstaller.')):
+                    return False
+                return True
+
+            filtered_imports = [m for m in hidden_imports if should_include_module(m)]
+            self.log(f"应用优化: 包含 {len(filtered_imports)} 个必要模块")
+            for module in filtered_imports:
                 cmd.append(f"--include-module={module}")
+
+        # ========== 增强Analysis阶段：对未配置的库使用完整收集 ==========
+        unconfigured_libs = self.dependency_analyzer._unconfigured_libraries
+        if unconfigured_libs:
+            # 过滤掉打包工具本身（排除 pyinstaller 和 nuitka）
+            def should_collect_lib(lib_name):
+                lib_lower = lib_name.lower()
+                if lib_lower in {'pyinstaller', 'nuitka'}:
+                    return False
+                return True
+
+            filtered_libs = [lib for lib in unconfigured_libs if should_collect_lib(lib)]
+            if filtered_libs:
+                self.log(f"\n增强Analysis阶段: 对 {len(filtered_libs)} 个未配置的库使用完整收集")
+                for lib in sorted(filtered_libs):
+                    # 先检测是否是真正的包（目录）还是单文件模块
+                    if is_real_package(lib):
+                        # 真正的包：使用 --include-package 收集整个包
+                        self.log(f"  收集 {lib} 的所有模块（包）...")
+                        cmd.append(f"--include-package={lib}")
+                        # 同时包含包的数据文件
+                        cmd.append(f"--include-package-data={lib}")
+                    else:
+                        # 单文件模块：使用 --include-module
+                        self.log(f"  收集 {lib}（单文件模块）...")
+                        cmd.append(f"--include-module={lib}")
+                self.log(f"  ✓ 已为未配置的库启用完整收集模式")
+
+        # 添加自动收集到的子模块
+        auto_collected = self.dependency_analyzer._auto_collected_modules
+        if auto_collected:
+            self.log(f"\n添加自动收集的子模块...")
+            added_count = 0
+            for lib, submodules in auto_collected.items():
+                # 跳过打包工具本身（所有变体）
+                lib_lower = lib.lower()
+                if lib_lower in {'pyinstaller', 'nuitka'}:
+                    continue
+                for submodule in submodules:
+                    # 跳过打包工具的所有子模块（所有变体）
+                    if (submodule.startswith(('pyinstaller.', 'nuitka.', 'PyInstaller.')) or
+                        submodule.lower().startswith(('pyinstaller.', 'nuitka.'))):
+                        continue
+                    if submodule not in hidden_imports:
+                        cmd.append(f"--include-module={submodule}")
+                        added_count += 1
+            if added_count > 0:
+                self.log(f"  已添加 {added_count} 个自动收集的子模块")
+
+        # 添加动态追踪到的导入
+        dynamic_imports = self.dependency_analyzer._dynamic_imports
+        if dynamic_imports:
+            self.log(f"\n添加动态追踪到的导入...")
+            added_dynamic = 0
+            for imp in dynamic_imports:
+                # 跳过已添加的
+                if imp in hidden_imports:
+                    continue
+                # 跳过标准库
+                root_module = imp.split('.')[0]
+                if self.dependency_analyzer._is_stdlib(root_module):
+                    continue
+                # 跳过打包工具本身（所有变体）
+                root_lower = root_module.lower()
+                if root_lower in {'pyinstaller', 'nuitka'}:
+                    continue
+                # 跳过打包工具的子模块
+                if imp.lower().startswith(('pyinstaller.', 'nuitka.')):
+                    continue
+                cmd.append(f"--include-module={imp}")
+                added_dynamic += 1
+            if added_dynamic > 0:
+                self.log(f"  已添加 {added_dynamic} 个动态追踪到的导入")
 
         # 添加Qt插件支持（仅当检测到Qt框架时）
         # 这是必要的，否则PyQt应用会报错：no Qt platform plugin could be initialized
@@ -2235,9 +3656,20 @@ _setup_icon()
             elif qt_framework == "PySide2":
                 cmd.append("--enable-plugin=pyside2")
 
-            # 包含必要的Qt插件
-            cmd.append("--include-qt-plugins=sensible,platforms,styles")
-            self.log("已启用Qt插件支持（包含platforms、styles）")
+            # 包含必要的Qt插件（包括图标引擎和图像格式支持）
+            cmd.append("--include-qt-plugins=sensible,platforms,styles,iconengines,imageformats")
+            self.log("已启用Qt插件支持（包含platforms、styles、iconengines、imageformats）")
+
+            # 包含 PyQt6 的数据文件（DLLs等）
+            cmd.append(f"--include-package-data={qt_framework}")
+            self.log(f"已包含 {qt_framework} 数据文件")
+
+        # ========== Tkinter 支持 ==========
+        # Tkinter 程序需要启用 tk-inter 插件，否则 TCL/TK 不会被包含
+        if uses_tkinter or uses_customtkinter:
+            self.log(f"\n配置 Tkinter 框架支持...")
+            cmd.append("--enable-plugin=tk-inter")
+            self.log("已启用 tk-inter 插件（包含 TCL/TK 运行时）")
 
         # 添加 wxPython 支持（仅当检测到 wxPython 框架时）
         # 注意：只有在确实使用 wx 时才添加，避免不必要的打包
@@ -2340,12 +3772,154 @@ _setup_icon()
         if uses_pysimplegui:
             self.log(f"\n配置 PySimpleGUI 框架支持...")
             cmd.append("--include-package=PySimpleGUI")
-            # PySimpleGUI默认使用tkinter，确保包含
+            # PySimpleGUI默认使用tkinter，确保启用tk-inter插件
+            if not uses_tkinter and not uses_customtkinter:
+                cmd.append("--enable-plugin=tk-inter")
+                self.log("已启用 tk-inter 插件（PySimpleGUI 依赖）")
             cmd.append("--include-module=tkinter")
             cmd.append("--include-module=tkinter.ttk")
             cmd.append("--include-module=tkinter.filedialog")
             cmd.append("--include-module=tkinter.messagebox")
             self.log("已配置 PySimpleGUI 框架支持")
+
+        # ========== Pygame 支持 ==========
+        if uses_pygame:
+            self.log(f"\n配置 Pygame 框架支持...")
+            cmd.append("--include-package=pygame")
+            cmd.append("--include-package-data=pygame")
+            # pygame 需要一些数据文件
+            cmd.append("--include-module=pygame.base")
+            cmd.append("--include-module=pygame.constants")
+            cmd.append("--include-module=pygame.display")
+            cmd.append("--include-module=pygame.event")
+            cmd.append("--include-module=pygame.image")
+            cmd.append("--include-module=pygame.mixer")
+            cmd.append("--include-module=pygame.font")
+            self.log("已配置 Pygame 框架支持")
+
+        # ========== Matplotlib 支持 ==========
+        if uses_matplotlib:
+            self.log(f"\n配置 Matplotlib 库支持...")
+            cmd.append("--include-package=matplotlib")
+            cmd.append("--include-package-data=matplotlib")
+            # matplotlib 后端
+            cmd.append("--include-module=matplotlib.backends.backend_tkagg")
+            cmd.append("--include-module=matplotlib.backends.backend_agg")
+            cmd.append("--include-module=matplotlib.figure")
+            cmd.append("--include-module=matplotlib.pyplot")
+            # 如果使用 tkinter 后端，确保启用 tk-inter 插件
+            if not uses_tkinter and not uses_customtkinter:
+                cmd.append("--enable-plugin=tk-inter")
+                self.log("已启用 tk-inter 插件（Matplotlib TkAgg 后端依赖）")
+            self.log("已配置 Matplotlib 库支持")
+
+        # ========== NumPy 支持 ==========
+        if uses_numpy:
+            self.log(f"\n配置 NumPy 库支持...")
+            cmd.append("--include-package=numpy")
+            cmd.append("--include-package-data=numpy")
+            cmd.append("--include-module=numpy.core._multiarray_umath")
+            cmd.append("--include-module=numpy.core._dtype_ctypes")
+            cmd.append("--include-module=numpy.random.common")
+            cmd.append("--include-module=numpy.random.bounded_integers")
+            cmd.append("--include-module=numpy.random.entropy")
+            cmd.append("--include-module=numpy.random.mtrand")
+            cmd.append("--include-module=numpy.fft")
+            self.log("已配置 NumPy 库支持")
+
+        # ========== SciPy 支持 ==========
+        if uses_scipy:
+            self.log(f"\n配置 SciPy 库支持...")
+            cmd.append("--include-package=scipy")
+            cmd.append("--include-package-data=scipy")
+            cmd.append("--include-module=scipy.integrate")
+            cmd.append("--include-module=scipy.optimize")
+            cmd.append("--include-module=scipy.linalg")
+            cmd.append("--include-module=scipy.sparse")
+            cmd.append("--include-module=scipy.special")
+            cmd.append("--include-module=scipy.stats")
+            cmd.append("--include-module=scipy.signal")
+            self.log("已配置 SciPy 库支持")
+
+        # ========== Pandas 支持 ==========
+        if uses_pandas:
+            self.log(f"\n配置 Pandas 库支持...")
+            cmd.append("--include-package=pandas")
+            cmd.append("--include-package-data=pandas")
+            cmd.append("--include-module=pandas._libs")
+            cmd.append("--include-module=pandas._libs.tslibs")
+            cmd.append("--include-module=pandas._libs.tslibs.np_datetime")
+            cmd.append("--include-module=pandas._libs.tslibs.nattype")
+            cmd.append("--include-module=pandas._libs.tslibs.timedeltas")
+            cmd.append("--include-module=pandas.core.ops")
+            self.log("已配置 Pandas 库支持")
+
+        # ========== OpenCV 支持 ==========
+        if uses_opencv:
+            self.log(f"\n配置 OpenCV 库支持...")
+            cmd.append("--include-package=cv2")
+            cmd.append("--include-package-data=cv2")
+            cmd.append("--include-module=cv2")
+            # OpenCV 依赖 numpy
+            if not uses_numpy:
+                cmd.append("--include-module=numpy")
+                cmd.append("--include-module=numpy.core._multiarray_umath")
+            self.log("已配置 OpenCV 库支持")
+
+        # ========== Pillow 支持 ==========
+        if uses_pillow:
+            self.log(f"\n配置 Pillow 库支持...")
+            cmd.append("--include-package=PIL")
+            cmd.append("--include-package-data=PIL")
+            cmd.append("--include-module=PIL._tkinter_finder")
+            cmd.append("--include-module=PIL._imaging")
+            cmd.append("--include-module=PIL.Image")
+            cmd.append("--include-module=PIL.ImageDraw")
+            cmd.append("--include-module=PIL.ImageFont")
+            self.log("已配置 Pillow 库支持")
+
+        # ========== SQLAlchemy 支持 ==========
+        if uses_sqlalchemy:
+            self.log(f"\n配置 SQLAlchemy 库支持...")
+            cmd.append("--include-package=sqlalchemy")
+            cmd.append("--include-package-data=sqlalchemy")
+            cmd.append("--include-module=sqlalchemy.dialects.sqlite")
+            cmd.append("--include-module=sqlalchemy.dialects.mysql")
+            cmd.append("--include-module=sqlalchemy.dialects.postgresql")
+            cmd.append("--include-module=sqlalchemy.sql.default_comparator")
+            cmd.append("--include-module=sqlalchemy.ext.baked")
+            self.log("已配置 SQLAlchemy 库支持")
+
+        # ========== Cryptography 支持 ==========
+        if uses_cryptography:
+            self.log(f"\n配置 Cryptography 库支持...")
+            cmd.append("--include-package=cryptography")
+            cmd.append("--include-package-data=cryptography")
+            cmd.append("--include-module=cryptography.hazmat.backends.openssl")
+            cmd.append("--include-module=cryptography.hazmat.bindings._rust")
+            cmd.append("--include-module=_cffi_backend")
+            self.log("已配置 Cryptography 库支持")
+
+        # ========== Requests 支持 ==========
+        if uses_requests:
+            self.log(f"\n配置 Requests 库支持...")
+            cmd.append("--include-package=requests")
+            cmd.append("--include-module=urllib3")
+            cmd.append("--include-module=charset_normalizer")
+            cmd.append("--include-module=idna")
+            # requests 依赖 certifi，确保包含
+            if not uses_certifi:
+                cmd.append("--include-package=certifi")
+                cmd.append("--include-package-data=certifi")
+                self.log("  已自动包含 certifi（SSL证书）")
+            self.log("已配置 Requests 库支持")
+
+        # ========== Certifi 支持（SSL证书数据文件）==========
+        if uses_certifi:
+            self.log(f"\n配置 Certifi 库支持...")
+            cmd.append("--include-package=certifi")
+            cmd.append("--include-package-data=certifi")
+            self.log("已配置 Certifi 库支持（包含CA证书）")
 
         # LTO链接时优化
         if config.get("lto", True):
@@ -2359,16 +3933,14 @@ _setup_icon()
         if config.get("python_opt", True):
             cmd.append("--python-flag=no_docstrings")
             cmd.append("--python-flag=no_asserts")
-            cmd.append("--python-flag=-O")
             self.log("\n已启用Python字节码优化，这将：")
             self.log("  - 移除文档字符串（docstrings）")
             self.log("  - 禁用断言语句（assert）")
-            self.log("  - 启用Python -O优化")
 
         # 与 1.bat 一致的优化参数
-        cmd.append("--no-pyi-file")
+        # 注意：--no-pyi-file 仅在模块模式下有效，standalone模式不需要
+        # 注意：--follow-stdlib 是 standalone 模式的默认行为，无需显式指定
         cmd.append("--no-prefer-source-code")
-        cmd.append("--follow-stdlib")
         cmd.append("--assume-yes-for-downloads")
 
         # 输出目录
@@ -2633,10 +4205,45 @@ _setup_icon()
                             except Exception as e:
                                 self.log(f"✗ 清理临时图标文件时出错: {str(e)}")
 
+                        # 清理资源文件（.rc 和 .res）
+                        rc_file_path = os.path.join(output_dir, "version_info.rc")
+                        if os.path.exists(rc_file_path):
+                            try:
+                                os.remove(rc_file_path)
+                                self.log(f"✓ 已清理: version_info.rc")
+                                cleaned_count += 1
+                            except Exception as e:
+                                self.log(f"✗ 清理资源文件时出错: {str(e)}")
+
+                        res_file_path = os.path.join(output_dir, "version_info.res")
+                        if os.path.exists(res_file_path):
+                            try:
+                                os.remove(res_file_path)
+                                self.log(f"✓ 已清理: version_info.res")
+                                cleaned_count += 1
+                            except Exception as e:
+                                self.log(f"✗ 清理资源文件时出错: {str(e)}")
+
+                        # 清理其他可能的临时资源文件（RC开头的临时文件）
+                        try:
+                            for item in os.listdir(output_dir):
+                                if os.path.isfile(os.path.join(output_dir, item)):
+                                    # 清理形如 RCa08700 的临时文件
+                                    if item.startswith('RC') and len(item) <= 10 and item[2:].isalnum():
+                                        temp_file = os.path.join(output_dir, item)
+                                        try:
+                                            os.remove(temp_file)
+                                            self.log(f"✓ 已清理: {item}")
+                                            cleaned_count += 1
+                                        except Exception as e:
+                                            self.log(f"✗ 清理 {item} 时出错: {str(e)}")
+                        except Exception as e:
+                            self.log(f"扫描临时文件时出错: {str(e)}")
+
                         if cleaned_count > 0:
-                            self.log(f"共清理了 {cleaned_count} 个缓存目录")
+                            self.log(f"共清理了 {cleaned_count} 个缓存文件/目录")
                         else:
-                            self.log("无需清理缓存目录")
+                            self.log("无需清理缓存文件")
 
                     # 保存 exe 路径用于后续打开目录
                     self._last_exe_path = exe_path

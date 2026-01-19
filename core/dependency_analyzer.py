@@ -1,8 +1,13 @@
 import ast
+import importlib
 import os
+import pkgutil
 import re
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -337,6 +342,64 @@ class DependencyAnalyzer:
     # 所有 Qt 绑定包列表（用于冲突检测）
     QT_BINDINGS = {"PyQt6", "PyQt5", "PySide6", "PySide2"}
 
+    # 已配置的库列表（用于判断是否使用通用策略）
+    CONFIGURED_LIBRARIES = {
+        # GUI框架
+        "PyQt6", "PyQt5", "PySide6", "PySide2", "tkinter", "customtkinter",
+        "wx", "wxPython", "kivy", "flet", "dearpygui", "DearPyGui", "toga",
+        "textual", "PySimpleGUI", "PySimpleGUIQt", "PySimpleGUIWx", "eel",
+        "pyforms", "GUI", "pygui", "libavg", "wax",
+        # Web爬虫
+        "selenium", "scrapy", "Scrapy", "playwright", "requests_html",
+        "bs4", "beautifulsoup4", "lxml",
+        # Web框架
+        "flask", "Flask", "django", "Django", "fastapi", "tornado", "aiohttp",
+        "gradio", "streamlit", "dash", "bokeh", "altair",
+        # 数据科学
+        "numpy", "pandas", "scipy", "matplotlib", "seaborn", "plotly",
+        "statsmodels",
+        # 机器学习
+        "sklearn", "scikit-learn", "tensorflow", "tf", "torch", "pytorch",
+        "transformers", "xgboost", "lightgbm", "catboost", "onnxruntime",
+        # 数据库
+        "pymongo", "redis", "pymysql", "psycopg2", "sqlalchemy", "SQLAlchemy",
+        "sqlmodel", "alembic", "peewee", "motor", "aiomysql", "aiopg",
+        # 办公文档
+        "openpyxl", "xlrd", "xlwt", "docx", "python-docx", "pptx", "python-pptx",
+        "PyPDF2", "pypdf", "pdfplumber", "fitz", "pymupdf", "reportlab",
+        # 任务调度
+        "celery", "Celery", "apscheduler", "schedule",
+        # 实用工具
+        "requests", "httpx", "loguru", "tqdm", "click", "typer", "colorama",
+        "arrow", "pendulum", "jieba", "qrcode", "pyqrcode", "barcode",
+        "python-barcode", "watchdog", "dotenv", "python-dotenv", "pydantic",
+        "marshmallow", "tenacity", "retrying", "faker", "Faker", "attrs", "attr",
+        # 网络
+        "websocket", "websocket-client", "paramiko", "httptools", "uvloop",
+        "gunicorn",
+        # 图像
+        "PIL", "Pillow", "pillow-simd", "cv2", "imageio", "pytesseract",
+        "easyocr",
+        # 音频
+        "pygame", "pyglet", "arcade", "panda3d", "ursina", "sounddevice",
+        "soundfile", "pyaudio", "pydub",
+        # 系统交互
+        "win32api", "win32com", "win32gui", "win32process", "pywin32",
+        "pyautogui", "pynput", "keyboard", "mouse", "comtypes", "pythonnet", "clr",
+        # 缓存序列化
+        "joblib", "dill", "cloudpickle", "cachetools", "diskcache",
+        # 日期时间
+        "pytz", "dateutil", "python-dateutil",
+        # Markdown
+        "markdown", "mistune",
+        # 加密
+        "cryptography", "Crypto", "pycryptodome",
+        # YAML/TOML
+        "yaml", "pyyaml", "toml", "tomli",
+        # 其他
+        "magic", "python-magic",
+    }
+
     def __init__(self):
         self.dependencies: Set[str] = set()
         self.all_imports: Set[str] = set()  # 所有导入的模块
@@ -345,6 +408,66 @@ class DependencyAnalyzer:
         self.primary_qt_framework: Optional[str] = None  # 主要使用的 Qt 框架
         self.log = print  # 日志回调函数
         self._project_internal_modules: Set[str] = set()  # 项目内部模块名
+        # 新增属性
+        self._dynamic_imports: Set[str] = set()  # 动态追踪到的导入
+        self._auto_collected_modules: Dict[str, List[str]] = {}  # 自动收集的子模块
+        self._unconfigured_libraries: Set[str] = set()  # 未配置的库（使用通用策略）
+        self._module_type_cache: Dict[str, bool] = {}  # 缓存模块类型检测结果
+
+    def is_real_package(self, module_name: str, python_path: Optional[str] = None) -> bool:
+        """
+        检测一个模块是否是真正的包（有 __path__ 属性）。
+        单文件模块（如 img2pdf.py）不是包，不能使用 --include-package。
+
+        Args:
+            module_name: 模块名
+            python_path: Python解释器路径（可选）
+
+        Returns:
+            True 如果是真正的包，False 如果是单文件模块
+        """
+        # 检查缓存
+        if module_name in self._module_type_cache:
+            return self._module_type_cache[module_name]
+
+        if python_path is None:
+            python_path = sys.executable
+
+        check_code = f'''
+import sys
+import importlib
+try:
+    mod = importlib.import_module("{module_name}")
+    # 真正的包有 __path__ 属性
+    if hasattr(mod, "__path__"):
+        print("package")
+    else:
+        print("module")
+except:
+    print("error")
+'''
+        try:
+            result = subprocess.run(
+                [python_path, "-c", check_code],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            output = result.stdout.strip()
+            if output == "package":
+                self._module_type_cache[module_name] = True
+                return True
+            elif output == "module":
+                self._module_type_cache[module_name] = False
+                return False
+            else:
+                # 导入失败或其他错误，默认假设是包（保守处理）
+                self._module_type_cache[module_name] = True
+                return True
+        except:
+            # 默认假设是包，保守处理
+            return True
 
     def detect_primary_qt_framework(self, script_path: str, project_dir: Optional[str] = None) -> Optional[str]:
         """
@@ -1234,8 +1357,172 @@ class DependencyAnalyzer:
                     "matplotlib.backends.backend_tkagg",
                     "matplotlib.backends.backend_agg",
                     "matplotlib.backends.backend_qt5agg",
+                    "matplotlib.backends.backend_qt6agg",
                     "matplotlib.figure",
                     "matplotlib.axes",
+                    "mpl_toolkits",
+                    "mpl_toolkits.mplot3d",
+                ]
+            )
+
+        # ========== scipy 相关 ==========
+        if "scipy" in self.dependencies:
+            hidden.extend(
+                [
+                    "scipy",
+                    "scipy.integrate",
+                    "scipy.optimize",
+                    "scipy.stats",
+                    "scipy.sparse",
+                    "scipy.linalg",
+                    "scipy.signal",
+                    "scipy.interpolate",
+                    "scipy.ndimage",
+                    "scipy.spatial",
+                    "scipy.special",
+                ]
+            )
+
+        # ========== scikit-learn 相关 ==========
+        if "sklearn" in self.dependencies or "scikit-learn" in self.dependencies:
+            hidden.extend(
+                [
+                    "sklearn",
+                    "sklearn.ensemble",
+                    "sklearn.linear_model",
+                    "sklearn.tree",
+                    "sklearn.svm",
+                    "sklearn.neighbors",
+                    "sklearn.naive_bayes",
+                    "sklearn.cluster",
+                    "sklearn.decomposition",
+                    "sklearn.model_selection",
+                    "sklearn.preprocessing",
+                    "sklearn.feature_extraction",
+                    "sklearn.metrics",
+                    "sklearn.pipeline",
+                    "sklearn.utils",
+                    "joblib",
+                ]
+            )
+
+        # ========== TensorFlow 相关 ==========
+        if "tensorflow" in self.dependencies or "tf" in self.dependencies:
+            hidden.extend(
+                [
+                    "tensorflow",
+                    "tensorflow.keras",
+                    "tensorflow.keras.models",
+                    "tensorflow.keras.layers",
+                    "tensorflow.keras.optimizers",
+                    "tensorflow.keras.callbacks",
+                    "tensorflow.python",
+                    "tensorflow.python.framework",
+                    "tensorflow.python.ops",
+                    "tensorflow.python.util",
+                    "tensorflow.lite",
+                    "tensorboard",
+                ]
+            )
+
+        # ========== PyTorch 相关 ==========
+        if "torch" in self.dependencies or "pytorch" in self.dependencies:
+            hidden.extend(
+                [
+                    "torch",
+                    "torch.nn",
+                    "torch.nn.functional",
+                    "torch.optim",
+                    "torch.utils",
+                    "torch.utils.data",
+                    "torch.autograd",
+                    "torch.cuda",
+                    "torch.jit",
+                    "torchvision",
+                    "torchvision.models",
+                    "torchvision.transforms",
+                    "torchvision.datasets",
+                ]
+            )
+
+        # ========== transformers 相关 ==========
+        if "transformers" in self.dependencies:
+            hidden.extend(
+                [
+                    "transformers",
+                    "transformers.models",
+                    "transformers.pipelines",
+                    "transformers.tokenization_utils",
+                    "transformers.modeling_utils",
+                    "transformers.configuration_utils",
+                    "tokenizers",
+                    "huggingface_hub",
+                ]
+            )
+
+        # ========== plotly 相关 ==========
+        if "plotly" in self.dependencies:
+            hidden.extend(
+                [
+                    "plotly",
+                    "plotly.graph_objs",
+                    "plotly.express",
+                    "plotly.figure_factory",
+                    "plotly.io",
+                    "plotly.offline",
+                    "plotly.tools",
+                ]
+            )
+
+        # ========== seaborn 相关 ==========
+        if "seaborn" in self.dependencies:
+            hidden.extend(
+                [
+                    "seaborn",
+                    "seaborn.matrix",
+                    "seaborn.distributions",
+                    "seaborn.categorical",
+                    "seaborn.regression",
+                ]
+            )
+
+        # ========== statsmodels 相关 ==========
+        if "statsmodels" in self.dependencies:
+            hidden.extend(
+                [
+                    "statsmodels",
+                    "statsmodels.api",
+                    "statsmodels.formula",
+                    "statsmodels.tsa",
+                    "statsmodels.stats",
+                    "patsy",
+                ]
+            )
+
+        # ========== xgboost 相关 ==========
+        if "xgboost" in self.dependencies:
+            hidden.extend(
+                [
+                    "xgboost",
+                    "xgboost.sklearn",
+                    "xgboost.plotting",
+                ]
+            )
+
+        # ========== lightgbm 相关 ==========
+        if "lightgbm" in self.dependencies:
+            hidden.extend(
+                [
+                    "lightgbm",
+                    "lightgbm.sklearn",
+                ]
+            )
+
+        # ========== catboost 相关 ==========
+        if "catboost" in self.dependencies:
+            hidden.extend(
+                [
+                    "catboost",
                 ]
             )
 
@@ -1249,8 +1536,1897 @@ class DependencyAnalyzer:
                 ]
             )
 
+        # ========== Selenium 相关 ==========
+        if "selenium" in self.dependencies:
+            hidden.extend(
+                [
+                    "selenium",
+                    "selenium.webdriver",
+                    "selenium.webdriver.common",
+                    "selenium.webdriver.common.by",
+                    "selenium.webdriver.common.keys",
+                    "selenium.webdriver.common.action_chains",
+                    "selenium.webdriver.common.desired_capabilities",
+                    "selenium.webdriver.support",
+                    "selenium.webdriver.support.ui",
+                    "selenium.webdriver.support.wait",
+                    "selenium.webdriver.support.expected_conditions",
+                    "selenium.webdriver.chrome",
+                    "selenium.webdriver.chrome.service",
+                    "selenium.webdriver.chrome.options",
+                    "selenium.webdriver.chrome.webdriver",
+                    "selenium.webdriver.firefox",
+                    "selenium.webdriver.firefox.service",
+                    "selenium.webdriver.firefox.options",
+                    "selenium.webdriver.firefox.webdriver",
+                    "selenium.webdriver.edge",
+                    "selenium.webdriver.edge.service",
+                    "selenium.webdriver.edge.options",
+                    "selenium.webdriver.safari",
+                    "selenium.webdriver.safari.service",
+                    "selenium.webdriver.remote",
+                    "selenium.webdriver.remote.webdriver",
+                    "selenium.webdriver.remote.webelement",
+                    "selenium.common",
+                    "selenium.common.exceptions",
+                    "urllib3",
+                    "certifi",
+                ]
+            )
+
+        # ========== Scrapy 相关 ==========
+        if "scrapy" in self.dependencies or "Scrapy" in self.dependencies:
+            hidden.extend(
+                [
+                    "scrapy",
+                    "scrapy.spiders",
+                    "scrapy.http",
+                    "scrapy.selector",
+                    "scrapy.item",
+                    "scrapy.loader",
+                    "scrapy.crawler",
+                    "scrapy.settings",
+                    "scrapy.exceptions",
+                    "scrapy.utils",
+                    "scrapy.pipelines",
+                    "scrapy.downloadermiddlewares",
+                    "scrapy.spidermiddlewares",
+                    "scrapy.extensions",
+                    "twisted",
+                    "twisted.internet",
+                    "twisted.web",
+                    "w3lib",
+                    "parsel",
+                    "lxml",
+                    "lxml.html",
+                    "lxml.etree",
+                ]
+            )
+
+        # ========== Playwright 相关 ==========
+        if "playwright" in self.dependencies:
+            hidden.extend(
+                [
+                    "playwright",
+                    "playwright.sync_api",
+                    "playwright.async_api",
+                    "playwright._impl",
+                    "playwright._impl._api_structures",
+                    "playwright._impl._browser",
+                    "playwright._impl._page",
+                    "greenlet",
+                ]
+            )
+
+        # ========== BeautifulSoup4 相关 ==========
+        if "bs4" in self.dependencies or "beautifulsoup4" in self.dependencies:
+            hidden.extend(
+                [
+                    "bs4",
+                    "bs4.builder",
+                    "bs4.element",
+                    "bs4.dammit",
+                    "soupsieve",
+                    "lxml",
+                    "lxml.html",
+                    "lxml.etree",
+                    "html5lib",
+                ]
+            )
+
+        # ========== lxml 相关 ==========
+        if "lxml" in self.dependencies:
+            hidden.extend(
+                [
+                    "lxml",
+                    "lxml.html",
+                    "lxml.etree",
+                    "lxml.objectify",
+                    "lxml._elementpath",
+                    "lxml.builder",
+                    "lxml.cssselect",
+                ]
+            )
+
+        # ========== requests-html 相关 ==========
+        if "requests_html" in self.dependencies or "requests-html" in self.dependencies:
+            hidden.extend(
+                [
+                    "requests_html",
+                    "pyppeteer",
+                    "websockets",
+                    "pyee",
+                    "bs4",
+                    "lxml",
+                ]
+            )
+
+        # ========== PyAutoGUI 相关 ==========
+        if "pyautogui" in self.dependencies:
+            hidden.extend(
+                [
+                    "pyautogui",
+                    "pymsgbox",
+                    "pytweening",
+                    "pyscreeze",
+                    "pygetwindow",
+                    "pyrect",
+                    "pyperclip",
+                    "mouseinfo",
+                    "PIL",
+                    "PIL.Image",
+                    "PIL.ImageGrab",
+                ]
+            )
+
+        # ========== pytest 相关 ==========
+        if "pytest" in self.dependencies:
+            hidden.extend(
+                [
+                    "pytest",
+                    "pytest.unittest",
+                    "_pytest",
+                    "_pytest.assertion",
+                    "_pytest.config",
+                    "_pytest.fixtures",
+                    "_pytest.main",
+                    "_pytest.python",
+                    "pluggy",
+                    "py",
+                ]
+            )
+
+        # ========== Flask 相关 ==========
+        if "flask" in self.dependencies or "Flask" in self.dependencies:
+            hidden.extend(
+                [
+                    "flask",
+                    "flask.app",
+                    "flask.blueprints",
+                    "flask.ctx",
+                    "flask.helpers",
+                    "flask.json",
+                    "flask.logging",
+                    "flask.sessions",
+                    "flask.signals",
+                    "flask.templating",
+                    "flask.views",
+                    "flask.wrappers",
+                    "werkzeug",
+                    "werkzeug.serving",
+                    "werkzeug.middleware",
+                    "werkzeug.routing",
+                    "werkzeug.security",
+                    "werkzeug.utils",
+                    "jinja2",
+                    "jinja2.ext",
+                    "jinja2.loaders",
+                    "click",
+                    "itsdangerous",
+                    "markupsafe",
+                ]
+            )
+
+        # ========== Django 相关 ==========
+        if "django" in self.dependencies or "Django" in self.dependencies:
+            hidden.extend(
+                [
+                    "django",
+                    "django.apps",
+                    "django.conf",
+                    "django.contrib",
+                    "django.contrib.admin",
+                    "django.contrib.auth",
+                    "django.contrib.contenttypes",
+                    "django.contrib.sessions",
+                    "django.contrib.messages",
+                    "django.contrib.staticfiles",
+                    "django.core",
+                    "django.core.management",
+                    "django.core.wsgi",
+                    "django.db",
+                    "django.db.models",
+                    "django.forms",
+                    "django.http",
+                    "django.middleware",
+                    "django.shortcuts",
+                    "django.template",
+                    "django.urls",
+                    "django.utils",
+                    "django.views",
+                    "asgiref",
+                    "sqlparse",
+                ]
+            )
+
+        # ========== FastAPI 相关 ==========
+        if "fastapi" in self.dependencies:
+            hidden.extend(
+                [
+                    "fastapi",
+                    "fastapi.applications",
+                    "fastapi.routing",
+                    "fastapi.params",
+                    "fastapi.dependencies",
+                    "fastapi.security",
+                    "fastapi.middleware",
+                    "fastapi.responses",
+                    "fastapi.encoders",
+                    "fastapi.exceptions",
+                    "starlette",
+                    "starlette.applications",
+                    "starlette.routing",
+                    "starlette.middleware",
+                    "starlette.responses",
+                    "starlette.requests",
+                    "pydantic",
+                    "pydantic.fields",
+                    "pydantic.main",
+                    "pydantic.types",
+                    "uvicorn",
+                    "uvicorn.config",
+                    "uvicorn.main",
+                ]
+            )
+
+        # ========== SQLAlchemy 相关 ==========
+        if "sqlalchemy" in self.dependencies or "SQLAlchemy" in self.dependencies:
+            hidden.extend(
+                [
+                    "sqlalchemy",
+                    "sqlalchemy.engine",
+                    "sqlalchemy.orm",
+                    "sqlalchemy.pool",
+                    "sqlalchemy.sql",
+                    "sqlalchemy.ext",
+                    "sqlalchemy.ext.declarative",
+                    "sqlalchemy.ext.hybrid",
+                    "sqlalchemy.dialects",
+                    "sqlalchemy.dialects.mysql",
+                    "sqlalchemy.dialects.postgresql",
+                    "sqlalchemy.dialects.sqlite",
+                    "sqlalchemy.dialects.mssql",
+                    "sqlalchemy.dialects.oracle",
+                ]
+            )
+
+        # ========== Redis 相关 ==========
+        if "redis" in self.dependencies:
+            hidden.extend(
+                [
+                    "redis",
+                    "redis.client",
+                    "redis.connection",
+                    "redis.exceptions",
+                    "redis.sentinel",
+                    "redis.cluster",
+                ]
+            )
+
+        # ========== Celery 相关 ==========
+        if "celery" in self.dependencies or "Celery" in self.dependencies:
+            hidden.extend(
+                [
+                    "celery",
+                    "celery.app",
+                    "celery.worker",
+                    "celery.task",
+                    "celery.result",
+                    "celery.signals",
+                    "celery.backends",
+                    "celery.backends.redis",
+                    "celery.backends.database",
+                    "celery.concurrency",
+                    "celery.utils",
+                    "kombu",
+                    "kombu.transport",
+                    "kombu.serialization",
+                    "billiard",
+                    "vine",
+                ]
+            )
+
+        # ========== openpyxl 相关 ==========
+        if "openpyxl" in self.dependencies:
+            hidden.extend(
+                [
+                    "openpyxl",
+                    "openpyxl.workbook",
+                    "openpyxl.worksheet",
+                    "openpyxl.cell",
+                    "openpyxl.styles",
+                    "openpyxl.chart",
+                    "openpyxl.utils",
+                    "et_xmlfile",
+                ]
+            )
+
+        # ========== xlrd/xlwt 相关 ==========
+        if "xlrd" in self.dependencies:
+            hidden.extend(
+                [
+                    "xlrd",
+                    "xlrd.book",
+                    "xlrd.sheet",
+                ]
+            )
+        if "xlwt" in self.dependencies:
+            hidden.extend(
+                [
+                    "xlwt",
+                    "xlwt.Workbook",
+                    "xlwt.Style",
+                ]
+            )
+
+        # ========== pywin32 相关 ==========
+        if any(dep in self.dependencies for dep in ["win32api", "win32com", "win32gui", "win32process", "pywin32"]):
+            hidden.extend(
+                [
+                    "win32api",
+                    "win32con",
+                    "win32com",
+                    "win32com.client",
+                    "win32com.server",
+                    "win32gui",
+                    "win32process",
+                    "win32file",
+                    "win32event",
+                    "win32security",
+                    "win32service",
+                    "pywintypes",
+                    "pythoncom",
+                ]
+            )
+
+        # ========== schedule 相关 ==========
+        if "schedule" in self.dependencies:
+            hidden.extend(
+                [
+                    "schedule",
+                ]
+            )
+
+        # ========== apscheduler 相关 ==========
+        if "apscheduler" in self.dependencies:
+            hidden.extend(
+                [
+                    "apscheduler",
+                    "apscheduler.schedulers",
+                    "apscheduler.triggers",
+                    "apscheduler.executors",
+                    "apscheduler.jobstores",
+                    "tzlocal",
+                ]
+            )
+
+        # ========== cryptography 相关 ==========
+        if "cryptography" in self.dependencies:
+            hidden.extend(
+                [
+                    "cryptography",
+                    "cryptography.fernet",
+                    "cryptography.hazmat",
+                    "cryptography.hazmat.primitives",
+                    "cryptography.hazmat.backends",
+                    "cryptography.x509",
+                    "_cffi_backend",
+                ]
+            )
+
+        # ========== pycryptodome 相关 ==========
+        if "Crypto" in self.dependencies or "pycryptodome" in self.dependencies:
+            hidden.extend(
+                [
+                    "Crypto",
+                    "Crypto.Cipher",
+                    "Crypto.Hash",
+                    "Crypto.PublicKey",
+                    "Crypto.Random",
+                    "Crypto.Signature",
+                    "Crypto.Util",
+                ]
+            )
+
+        # ========== paramiko 相关 ==========
+        if "paramiko" in self.dependencies:
+            hidden.extend(
+                [
+                    "paramiko",
+                    "paramiko.client",
+                    "paramiko.transport",
+                    "paramiko.channel",
+                    "paramiko.sftp",
+                    "paramiko.sftp_client",
+                ]
+            )
+
+        # ========== pymysql 相关 ==========
+        if "pymysql" in self.dependencies:
+            hidden.extend(
+                [
+                    "pymysql",
+                    "pymysql.cursors",
+                    "pymysql.connections",
+                ]
+            )
+
+        # ========== psycopg2 相关 ==========
+        if "psycopg2" in self.dependencies:
+            hidden.extend(
+                [
+                    "psycopg2",
+                    "psycopg2.extensions",
+                    "psycopg2.extras",
+                    "psycopg2._psycopg",
+                ]
+            )
+
+        # ========== pymongo 相关 ==========
+        if "pymongo" in self.dependencies:
+            hidden.extend(
+                [
+                    "pymongo",
+                    "pymongo.collection",
+                    "pymongo.database",
+                    "pymongo.cursor",
+                    "bson",
+                    "bson.json_util",
+                ]
+            )
+
+        # ========== aiohttp 相关 ==========
+        if "aiohttp" in self.dependencies:
+            hidden.extend(
+                [
+                    "aiohttp",
+                    "aiohttp.client",
+                    "aiohttp.web",
+                    "aiohttp.connector",
+                    "aiohttp.helpers",
+                    "multidict",
+                    "yarl",
+                    "async_timeout",
+                    "aiosignal",
+                ]
+            )
+
+        # ========== tornado 相关 ==========
+        if "tornado" in self.dependencies:
+            hidden.extend(
+                [
+                    "tornado",
+                    "tornado.web",
+                    "tornado.ioloop",
+                    "tornado.httpserver",
+                    "tornado.websocket",
+                ]
+            )
+
+        # ========== PyYAML 相关 ==========
+        if "yaml" in self.dependencies or "pyyaml" in self.dependencies:
+            hidden.extend(
+                [
+                    "yaml",
+                    "yaml.loader",
+                    "yaml.dumper",
+                ]
+            )
+
+        # ========== toml 相关 ==========
+        if "toml" in self.dependencies or "tomli" in self.dependencies:
+            hidden.extend(
+                [
+                    "toml",
+                    "tomli",
+                ]
+            )
+
+        # ========== loguru 相关 ==========
+        if "loguru" in self.dependencies:
+            hidden.extend(
+                [
+                    "loguru",
+                    "loguru._logger",
+                ]
+            )
+
+        # ========== click 相关 ==========
+        if "click" in self.dependencies:
+            hidden.extend(
+                [
+                    "click",
+                    "click.core",
+                    "click.decorators",
+                    "click.types",
+                    "click.utils",
+                ]
+            )
+
+        # ========== typer 相关 ==========
+        if "typer" in self.dependencies:
+            hidden.extend(
+                [
+                    "typer",
+                    "typer.main",
+                    "click",
+                ]
+            )
+
+        # ========== tqdm 相关 ==========
+        if "tqdm" in self.dependencies:
+            hidden.extend(
+                [
+                    "tqdm",
+                    "tqdm.auto",
+                    "tqdm.std",
+                    "tqdm.gui",
+                    "tqdm.asyncio",
+                ]
+            )
+
+        # ========== colorama 相关 ==========
+        if "colorama" in self.dependencies:
+            hidden.extend(
+                [
+                    "colorama",
+                    "colorama.ansi",
+                    "colorama.win32",
+                ]
+            )
+
+        # ========== arrow 相关 ==========
+        if "arrow" in self.dependencies:
+            hidden.extend(
+                [
+                    "arrow",
+                    "arrow.arrow",
+                    "arrow.factory",
+                ]
+            )
+
+        # ========== pendulum 相关 ==========
+        if "pendulum" in self.dependencies:
+            hidden.extend(
+                [
+                    "pendulum",
+                    "pendulum.tz",
+                    "pendulum.parsing",
+                ]
+            )
+
+        # ========== httpx 相关 ==========
+        if "httpx" in self.dependencies:
+            hidden.extend(
+                [
+                    "httpx",
+                    "httpx._client",
+                    "httpx._models",
+                    "httpx._transports",
+                    "h11",
+                    "h2",
+                    "httpcore",
+                ]
+            )
+
+        # ========== websocket-client 相关 ==========
+        if "websocket" in self.dependencies or "websocket-client" in self.dependencies:
+            hidden.extend(
+                [
+                    "websocket",
+                    "websocket._app",
+                    "websocket._core",
+                ]
+            )
+
+        # ========== Pillow 额外功能 ==========
+        if "PIL" in self.dependencies or "Pillow" in self.dependencies:
+            # 额外的 Pillow 插件和功能
+            hidden.extend(
+                [
+                    "PIL.BmpImagePlugin",
+                    "PIL.GifImagePlugin",
+                    "PIL.JpegImagePlugin",
+                    "PIL.PngImagePlugin",
+                    "PIL.TiffImagePlugin",
+                    "PIL.WebPImagePlugin",
+                ]
+            )
+
+        # ========== pdfplumber / PyPDF2 相关 ==========
+        if "pdfplumber" in self.dependencies:
+            hidden.extend(
+                [
+                    "pdfplumber",
+                    "pdfplumber.page",
+                    "pdfplumber.pdf",
+                    "pdfminer",
+                    "pdfminer.high_level",
+                ]
+            )
+        if "PyPDF2" in self.dependencies or "pypdf" in self.dependencies:
+            hidden.extend(
+                [
+                    "PyPDF2",
+                    "pypdf",
+                ]
+            )
+
+        # ========== python-docx 相关 ==========
+        if "docx" in self.dependencies or "python-docx" in self.dependencies:
+            hidden.extend(
+                [
+                    "docx",
+                    "docx.document",
+                    "docx.oxml",
+                    "docx.shared",
+                ]
+            )
+
+        # ========== python-pptx 相关 ==========
+        if "pptx" in self.dependencies or "python-pptx" in self.dependencies:
+            hidden.extend(
+                [
+                    "pptx",
+                    "pptx.presentation",
+                    "pptx.slide",
+                    "pptx.shapes",
+                ]
+            )
+
+        # ========== jieba 相关 ==========
+        if "jieba" in self.dependencies:
+            hidden.extend(
+                [
+                    "jieba",
+                    "jieba.analyse",
+                    "jieba.posseg",
+                ]
+            )
+
+        # ========== PIL/Pillow 图像处理扩展 ==========
+        if "imageio" in self.dependencies:
+            hidden.extend(
+                [
+                    "imageio",
+                    "imageio.core",
+                    "imageio.plugins",
+                ]
+            )
+
+        # ========== python-magic 相关 ==========
+        if "magic" in self.dependencies or "python-magic" in self.dependencies:
+            hidden.extend(
+                [
+                    "magic",
+                ]
+            )
+
+        # ========== pyqrcode / qrcode 相关 ==========
+        if "qrcode" in self.dependencies:
+            hidden.extend(
+                [
+                    "qrcode",
+                    "qrcode.image",
+                    "qrcode.image.svg",
+                    "qrcode.image.pure",
+                ]
+            )
+        if "pyqrcode" in self.dependencies:
+            hidden.extend(
+                [
+                    "pyqrcode",
+                ]
+            )
+
+        # ========== barcode 相关 ==========
+        if "barcode" in self.dependencies or "python-barcode" in self.dependencies:
+            hidden.extend(
+                [
+                    "barcode",
+                    "barcode.writer",
+                ]
+            )
+
+        # ========== watchdog 相关 ==========
+        if "watchdog" in self.dependencies:
+            hidden.extend(
+                [
+                    "watchdog",
+                    "watchdog.observers",
+                    "watchdog.events",
+                ]
+            )
+
+        # ========== pymupdf (fitz) 相关 ==========
+        if "fitz" in self.dependencies or "pymupdf" in self.dependencies:
+            hidden.extend(
+                [
+                    "fitz",
+                    "fitz.fitz",
+                ]
+            )
+
+        # ========== reportlab 相关 ==========
+        if "reportlab" in self.dependencies:
+            hidden.extend(
+                [
+                    "reportlab",
+                    "reportlab.pdfgen",
+                    "reportlab.pdfgen.canvas",
+                    "reportlab.lib",
+                    "reportlab.lib.pagesizes",
+                    "reportlab.lib.styles",
+                    "reportlab.lib.units",
+                    "reportlab.lib.colors",
+                    "reportlab.platypus",
+                    "reportlab.platypus.paragraph",
+                    "reportlab.platypus.tables",
+                    "reportlab.platypus.doctemplate",
+                ]
+            )
+
+        # ========== markdown 相关 ==========
+        if "markdown" in self.dependencies:
+            hidden.extend(
+                [
+                    "markdown",
+                    "markdown.extensions",
+                    "markdown.preprocessors",
+                    "markdown.blockprocessors",
+                    "markdown.treeprocessors",
+                    "markdown.inlinepatterns",
+                    "markdown.postprocessors",
+                ]
+            )
+
+        # ========== mistune 相关 ==========
+        if "mistune" in self.dependencies:
+            hidden.extend(
+                [
+                    "mistune",
+                    "mistune.directives",
+                    "mistune.plugins",
+                ]
+            )
+
+        # ========== pytesseract 相关 ==========
+        if "pytesseract" in self.dependencies:
+            hidden.extend(
+                [
+                    "pytesseract",
+                ]
+            )
+
+        # ========== easyocr 相关 ==========
+        if "easyocr" in self.dependencies:
+            hidden.extend(
+                [
+                    "easyocr",
+                    "easyocr.recognition",
+                    "easyocr.detection",
+                    "easyocr.utils",
+                ]
+            )
+
+        # ========== onnxruntime 相关 ==========
+        if "onnxruntime" in self.dependencies:
+            hidden.extend(
+                [
+                    "onnxruntime",
+                    "onnxruntime.capi",
+                    "onnxruntime.capi.onnxruntime_pybind11_state",
+                ]
+            )
+
+        # ========== gradio 相关 ==========
+        if "gradio" in self.dependencies:
+            hidden.extend(
+                [
+                    "gradio",
+                    "gradio.interface",
+                    "gradio.components",
+                    "gradio.blocks",
+                    "gradio.routes",
+                    "gradio.utils",
+                    "gradio.processing_utils",
+                    "gradio.external",
+                ]
+            )
+
+        # ========== streamlit 相关 ==========
+        if "streamlit" in self.dependencies:
+            hidden.extend(
+                [
+                    "streamlit",
+                    "streamlit.components",
+                    "streamlit.elements",
+                    "streamlit.delta_generator",
+                    "streamlit.runtime",
+                    "streamlit.runtime.scriptrunner",
+                    "streamlit.web",
+                ]
+            )
+
+        # ========== dash 相关 ==========
+        if "dash" in self.dependencies:
+            hidden.extend(
+                [
+                    "dash",
+                    "dash.dependencies",
+                    "dash.development",
+                    "dash.exceptions",
+                    "dash_core_components",
+                    "dash_html_components",
+                    "dash_table",
+                ]
+            )
+
+        # ========== bokeh 相关 ==========
+        if "bokeh" in self.dependencies:
+            hidden.extend(
+                [
+                    "bokeh",
+                    "bokeh.plotting",
+                    "bokeh.models",
+                    "bokeh.layouts",
+                    "bokeh.io",
+                    "bokeh.server",
+                    "bokeh.palettes",
+                    "bokeh.transform",
+                ]
+            )
+
+        # ========== altair 相关 ==========
+        if "altair" in self.dependencies:
+            hidden.extend(
+                [
+                    "altair",
+                    "altair.vegalite",
+                    "altair.utils",
+                ]
+            )
+
+        # ========== sqlmodel 相关 ==========
+        if "sqlmodel" in self.dependencies:
+            hidden.extend(
+                [
+                    "sqlmodel",
+                    "sqlmodel.main",
+                    "sqlmodel.engine",
+                ]
+            )
+
+        # ========== alembic 相关 ==========
+        if "alembic" in self.dependencies:
+            hidden.extend(
+                [
+                    "alembic",
+                    "alembic.config",
+                    "alembic.migration",
+                    "alembic.operations",
+                    "alembic.autogenerate",
+                    "alembic.script",
+                ]
+            )
+
+        # ========== peewee 相关 ==========
+        if "peewee" in self.dependencies:
+            hidden.extend(
+                [
+                    "peewee",
+                    "playhouse",
+                    "playhouse.migrate",
+                    "playhouse.pool",
+                    "playhouse.shortcuts",
+                ]
+            )
+
+        # ========== motor 相关 ==========
+        if "motor" in self.dependencies:
+            hidden.extend(
+                [
+                    "motor",
+                    "motor.motor_asyncio",
+                    "motor.motor_tornado",
+                ]
+            )
+
+        # ========== aiomysql 相关 ==========
+        if "aiomysql" in self.dependencies:
+            hidden.extend(
+                [
+                    "aiomysql",
+                    "aiomysql.cursors",
+                    "aiomysql.connection",
+                    "aiomysql.pool",
+                ]
+            )
+
+        # ========== aiopg 相关 ==========
+        if "aiopg" in self.dependencies:
+            hidden.extend(
+                [
+                    "aiopg",
+                    "aiopg.pool",
+                    "aiopg.connection",
+                    "aiopg.cursor",
+                ]
+            )
+
+        # ========== httptools 相关 ==========
+        if "httptools" in self.dependencies:
+            hidden.extend(
+                [
+                    "httptools",
+                    "httptools.parser",
+                ]
+            )
+
+        # ========== uvloop 相关 ==========
+        if "uvloop" in self.dependencies:
+            hidden.extend(
+                [
+                    "uvloop",
+                ]
+            )
+
+        # ========== gunicorn 相关 ==========
+        if "gunicorn" in self.dependencies:
+            hidden.extend(
+                [
+                    "gunicorn",
+                    "gunicorn.app",
+                    "gunicorn.workers",
+                    "gunicorn.config",
+                ]
+            )
+
+        # ========== pytz 相关 ==========
+        if "pytz" in self.dependencies:
+            hidden.extend(
+                [
+                    "pytz",
+                ]
+            )
+
+        # ========== dateutil 相关 ==========
+        if "dateutil" in self.dependencies or "python-dateutil" in self.dependencies:
+            hidden.extend(
+                [
+                    "dateutil",
+                    "dateutil.parser",
+                    "dateutil.tz",
+                    "dateutil.relativedelta",
+                ]
+            )
+
+        # ========== faker 相关 ==========
+        if "faker" in self.dependencies or "Faker" in self.dependencies:
+            hidden.extend(
+                [
+                    "faker",
+                    "faker.providers",
+                ]
+            )
+
+        # ========== attrs 相关 ==========
+        if "attrs" in self.dependencies or "attr" in self.dependencies:
+            hidden.extend(
+                [
+                    "attr",
+                    "attrs",
+                ]
+            )
+
+        # ========== pydantic 相关 ==========
+        if "pydantic" in self.dependencies:
+            hidden.extend(
+                [
+                    "pydantic",
+                    "pydantic.fields",
+                    "pydantic.main",
+                    "pydantic.types",
+                    "pydantic.validators",
+                    "pydantic.networks",
+                    "pydantic.color",
+                ]
+            )
+
+        # ========== marshmallow 相关 ==========
+        if "marshmallow" in self.dependencies:
+            hidden.extend(
+                [
+                    "marshmallow",
+                    "marshmallow.fields",
+                    "marshmallow.validate",
+                    "marshmallow.decorators",
+                ]
+            )
+
+        # ========== python-dotenv 相关 ==========
+        if "dotenv" in self.dependencies or "python-dotenv" in self.dependencies:
+            hidden.extend(
+                [
+                    "dotenv",
+                    "dotenv.main",
+                ]
+            )
+
+        # ========== tenacity 相关 ==========
+        if "tenacity" in self.dependencies:
+            hidden.extend(
+                [
+                    "tenacity",
+                    "tenacity.retry",
+                    "tenacity.stop",
+                    "tenacity.wait",
+                ]
+            )
+
+        # ========== retrying 相关 ==========
+        if "retrying" in self.dependencies:
+            hidden.extend(
+                [
+                    "retrying",
+                ]
+            )
+
+        # ========== cachetools 相关 ==========
+        if "cachetools" in self.dependencies:
+            hidden.extend(
+                [
+                    "cachetools",
+                    "cachetools.func",
+                ]
+            )
+
+        # ========== diskcache 相关 ==========
+        if "diskcache" in self.dependencies:
+            hidden.extend(
+                [
+                    "diskcache",
+                    "diskcache.core",
+                ]
+            )
+
+        # ========== joblib 相关 ==========
+        if "joblib" in self.dependencies:
+            hidden.extend(
+                [
+                    "joblib",
+                    "joblib.parallel",
+                    "joblib.memory",
+                ]
+            )
+
+        # ========== dill 相关 ==========
+        if "dill" in self.dependencies:
+            hidden.extend(
+                [
+                    "dill",
+                    "dill._dill",
+                ]
+            )
+
+        # ========== cloudpickle 相关 ==========
+        if "cloudpickle" in self.dependencies:
+            hidden.extend(
+                [
+                    "cloudpickle",
+                    "cloudpickle.cloudpickle",
+                ]
+            )
+
+        # ========== pygame 相关 ==========
+        if "pygame" in self.dependencies:
+            hidden.extend(
+                [
+                    "pygame",
+                    "pygame.base",
+                    "pygame.constants",
+                    "pygame.rect",
+                    "pygame.rwobject",
+                    "pygame.surface",
+                    "pygame.surflock",
+                    "pygame.color",
+                    "pygame.bufferproxy",
+                    "pygame.math",
+                    "pygame.mixer",
+                    "pygame.mixer_music",
+                    "pygame.font",
+                    "pygame.image",
+                    "pygame.joystick",
+                    "pygame.key",
+                    "pygame.mouse",
+                    "pygame.cursors",
+                    "pygame.display",
+                    "pygame.draw",
+                    "pygame.event",
+                    "pygame.pixelcopy",
+                    "pygame.transform",
+                    "pygame.sprite",
+                    "pygame.time",
+                ]
+            )
+
+        # ========== pyglet 相关 ==========
+        if "pyglet" in self.dependencies:
+            hidden.extend(
+                [
+                    "pyglet",
+                    "pyglet.window",
+                    "pyglet.app",
+                    "pyglet.graphics",
+                    "pyglet.image",
+                    "pyglet.text",
+                    "pyglet.font",
+                    "pyglet.media",
+                    "pyglet.sprite",
+                    "pyglet.shapes",
+                    "pyglet.gl",
+                ]
+            )
+
+        # ========== arcade 相关 ==========
+        if "arcade" in self.dependencies:
+            hidden.extend(
+                [
+                    "arcade",
+                    "arcade.window_commands",
+                    "arcade.draw_commands",
+                    "arcade.sprite",
+                    "arcade.sprite_list",
+                    "arcade.physics_engines",
+                    "arcade.tilemap",
+                ]
+            )
+
+        # ========== panda3d 相关 ==========
+        if "panda3d" in self.dependencies:
+            hidden.extend(
+                [
+                    "panda3d",
+                    "direct",
+                    "direct.showbase",
+                    "direct.task",
+                    "direct.actor",
+                    "direct.gui",
+                ]
+            )
+
+        # ========== ursina 相关 ==========
+        if "ursina" in self.dependencies:
+            hidden.extend(
+                [
+                    "ursina",
+                    "ursina.prefabs",
+                    "ursina.shaders",
+                ]
+            )
+
+        # ========== pythonnet 相关 ==========
+        if "pythonnet" in self.dependencies or "clr" in self.dependencies:
+            hidden.extend(
+                [
+                    "clr",
+                    "Python.Runtime",
+                ]
+            )
+
+        # ========== comtypes 相关 ==========
+        if "comtypes" in self.dependencies:
+            hidden.extend(
+                [
+                    "comtypes",
+                    "comtypes.client",
+                    "comtypes.automation",
+                    "comtypes.server",
+                ]
+            )
+
+        # ========== pynput 相关 ==========
+        if "pynput" in self.dependencies:
+            hidden.extend(
+                [
+                    "pynput",
+                    "pynput.keyboard",
+                    "pynput.mouse",
+                ]
+            )
+
+        # ========== keyboard 相关 ==========
+        if "keyboard" in self.dependencies:
+            hidden.extend(
+                [
+                    "keyboard",
+                    "keyboard._keyboard_event",
+                ]
+            )
+
+        # ========== mouse 相关 ==========
+        if "mouse" in self.dependencies:
+            hidden.extend(
+                [
+                    "mouse",
+                    "mouse._mouse_event",
+                ]
+            )
+
+        # ========== sounddevice 相关 ==========
+        if "sounddevice" in self.dependencies:
+            hidden.extend(
+                [
+                    "sounddevice",
+                    "_sounddevice",
+                ]
+            )
+
+        # ========== soundfile 相关 ==========
+        if "soundfile" in self.dependencies:
+            hidden.extend(
+                [
+                    "soundfile",
+                    "_soundfile",
+                ]
+            )
+
+        # ========== pyaudio 相关 ==========
+        if "pyaudio" in self.dependencies:
+            hidden.extend(
+                [
+                    "pyaudio",
+                    "_portaudio",
+                ]
+            )
+
+        # ========== pydub 相关 ==========
+        if "pydub" in self.dependencies:
+            hidden.extend(
+                [
+                    "pydub",
+                    "pydub.audio_segment",
+                    "pydub.effects",
+                    "pydub.playback",
+                ]
+            )
+
+        # ========== pillow-simd 相关 ==========
+        if "pillow-simd" in self.dependencies:
+            hidden.extend(
+                [
+                    "PIL",
+                    "PIL.Image",
+                    "PIL._imaging",
+                ]
+            )
+
+        # ========== numpy 扩展支持 ==========
+        if "numpy" in self.dependencies:
+            # 添加更多 numpy 子模块
+            hidden.extend(
+                [
+                    "numpy.fft",
+                    "numpy.polynomial",
+                    "numpy.random.mtrand",
+                    "numpy.random.bit_generator",
+                    "numpy.random.generator",
+                ]
+            )
+
+        # ========== 第一层：动态追踪到的导入 ==========
+        if self._dynamic_imports:
+            self.log(f"\n添加动态追踪到的 {len(self._dynamic_imports)} 个导入...")
+            hidden.extend(list(self._dynamic_imports))
+
+        # ========== 第二层：通用库自动支持 ==========
+        # 处理未在已知配置列表中的库
+        unconfigured = set()
+        for dep in self.dependencies:
+            # 跳过标准库
+            if self._is_stdlib(dep):
+                continue
+
+            # 检查是否已配置（检查多种可能的名称形式）
+            dep_lower = dep.lower()
+            dep_normalized = dep.replace('-', '_').replace('.', '_')
+
+            is_configured = (
+                dep in self.CONFIGURED_LIBRARIES or
+                dep_lower in {lib.lower() for lib in self.CONFIGURED_LIBRARIES} or
+                dep_normalized in self.CONFIGURED_LIBRARIES
+            )
+
+            # 检查是否已经在hidden中有相关导入
+            has_hidden = any(dep_lower in h.lower() for h in hidden)
+
+            if not is_configured and not has_hidden:
+                unconfigured.add(dep)
+
+        # 对未配置的库使用通用策略
+        if unconfigured:
+            self.log(f"\n检测到 {len(unconfigured)} 个未配置的库，使用通用策略:")
+            for dep in sorted(unconfigured):
+                self._unconfigured_libraries.add(dep)
+
+                # 添加库本身
+                hidden.append(dep)
+
+                # 检测是否是真正的包还是单文件模块
+                is_package = self.is_real_package(dep)
+
+                if is_package:
+                    self.log(f"  ⚠️ {dep} (包)")
+                    # 如果已经自动收集了子模块，使用它们
+                    if dep in self._auto_collected_modules:
+                        submodules = self._auto_collected_modules[dep]
+                        hidden.extend(submodules)
+                        self.log(f"     已使用自动收集的 {len(submodules)} 个子模块")
+                    else:
+                        # 添加常见子模块模式
+                        common_patterns = [
+                            f"{dep}.utils",
+                            f"{dep}.core",
+                            f"{dep}.base",
+                            f"{dep}.main",
+                            f"{dep}.api",
+                            f"{dep}.models",
+                            f"{dep}.config",
+                            f"{dep}.exceptions",
+                            f"{dep}.helpers",
+                            f"{dep}.common",
+                            f"{dep}._internal",
+                        ]
+                        hidden.extend(common_patterns)
+                        self.log(f"     使用常见模式策略（11个常见子模块）")
+                else:
+                    # 单文件模块，不需要添加子模块
+                    self.log(f"  ⚠️ {dep} (单文件模块)")
+
         # 去重
         return list(set(hidden))
+
+    # ========== 动态模块导入追踪 ==========
+    def _detect_gui_in_script(self, script_path: str) -> Tuple[bool, str]:
+        """
+        检测脚本是否是 GUI 程序（通过检测主循环调用）
+
+        仅检测导入是不够的，因为很多非 GUI 程序也会导入 GUI 库用于其他目的。
+        这里检测的是实际调用 GUI 主循环的代码。
+
+        Args:
+            script_path: 脚本路径
+
+        Returns:
+            (是否是GUI程序, GUI框架名称)
+        """
+        # GUI 主循环调用模式 - 只有真正运行 GUI 的程序才会调用这些
+        gui_mainloop_patterns = {
+            # Tkinter - 检测 mainloop() 调用
+            'tkinter': ['.mainloop(', 'mainloop()'],
+            # PyQt/PySide - 检测 exec() 或 exec_() 调用
+            'PyQt6': ['.exec()', '.exec_()', 'app.exec()', 'app.exec_()'],
+            'PyQt5': ['.exec()', '.exec_()', 'app.exec()', 'app.exec_()'],
+            'PySide6': ['.exec()', '.exec_()', 'app.exec()', 'app.exec_()'],
+            'PySide2': ['.exec()', '.exec_()', 'app.exec()', 'app.exec_()'],
+            # wxPython - 检测 MainLoop() 调用
+            'wx': ['.MainLoop()', 'app.MainLoop()'],
+            # Kivy - 检测 run() 调用
+            'kivy': ['.run()', 'App().run()', 'runTouchApp('],
+            # PyGame - 检测 display.set_mode 或游戏循环
+            'pygame': ['pygame.display.set_mode(', 'pygame.init()'],
+            # CustomTkinter - 同 tkinter
+            'customtkinter': ['.mainloop(', 'mainloop()'],
+            # DearPyGui
+            'dearpygui': ['dpg.start_dearpygui(', 'dearpygui.start_dearpygui('],
+            # Flet
+            'flet': ['ft.app(', 'flet.app('],
+            # Toga
+            'toga': ['.main_loop()', 'app.main_loop()'],
+            # Eel
+            'eel': ['eel.start('],
+            # PySimpleGUI
+            'PySimpleGUI': ['.read()', 'window.read('],
+        }
+
+        # 同时需要检测导入，确保主循环确实属于 GUI 框架
+        gui_import_patterns = {
+            'tkinter': ['import tkinter', 'from tkinter'],
+            'PyQt6': ['from PyQt6', 'import PyQt6'],
+            'PyQt5': ['from PyQt5', 'import PyQt5'],
+            'PySide6': ['from PySide6', 'import PySide6'],
+            'PySide2': ['from PySide2', 'import PySide2'],
+            'wx': ['import wx', 'from wx'],
+            'kivy': ['import kivy', 'from kivy'],
+            'pygame': ['import pygame', 'from pygame'],
+            'customtkinter': ['import customtkinter', 'from customtkinter'],
+            'dearpygui': ['import dearpygui', 'from dearpygui'],
+            'flet': ['import flet', 'from flet'],
+            'toga': ['import toga', 'from toga'],
+            'eel': ['import eel', 'from eel'],
+            'PySimpleGUI': ['import PySimpleGUI', 'from PySimpleGUI'],
+        }
+
+        try:
+            with open(script_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+            for framework, mainloop_patterns in gui_mainloop_patterns.items():
+                # 首先检查是否导入了这个框架
+                import_patterns = gui_import_patterns.get(framework, [])
+                has_import = any(pattern in content for pattern in import_patterns)
+
+                if has_import:
+                    # 然后检查是否调用了主循环
+                    for pattern in mainloop_patterns:
+                        if pattern in content:
+                            return True, framework
+        except Exception:
+            pass
+
+        return False, ""
+
+    def trace_dynamic_imports(
+        self,
+        script_path: str,
+        python_path: str,
+        project_dir: Optional[str] = None,
+        timeout: int = 20
+    ) -> Tuple[bool, Set[str]]:
+        """
+        动态追踪脚本运行时的所有导入
+
+        Args:
+            script_path: Python脚本路径
+            python_path: Python解释器路径
+            project_dir: 项目目录
+            timeout: 超时时间（秒）
+
+        Returns:
+            (是否成功, 追踪到的模块集合)
+        """
+        self.log("\n" + "=" * 50)
+        self.log("第一层防护：动态模块导入追踪")
+        self.log("=" * 50)
+
+        # 检测是否是 GUI 程序
+        is_gui, gui_framework = self._detect_gui_in_script(script_path)
+        if is_gui:
+            self.log(f"检测到 GUI 框架: {gui_framework}")
+            self.log("GUI 程序不适合动态追踪（会打开窗口），跳过此步骤")
+            self.log("将使用静态分析 + 通用策略")
+            return False, set()
+
+        # 创建追踪脚本 - 只追踪导入阶段，不执行主逻辑
+        tracer_code = '''
+import sys
+import importlib
+import importlib.abc
+import json
+import threading
+
+class ImportTracer(importlib.abc.MetaPathFinder):
+    def __init__(self):
+        self.imports = set()
+
+    def find_module(self, fullname, path=None):
+        self.imports.add(fullname)
+        return None
+
+tracer = ImportTracer()
+sys.meta_path.insert(0, tracer)
+
+# 用于标记是否应该退出
+_should_exit = False
+_import_phase_done = False
+
+def output_and_exit():
+    """输出收集到的导入并退出"""
+    print("__IMPORTS_START__")
+    print(json.dumps(list(tracer.imports)))
+    print("__IMPORTS_END__")
+    sys.stdout.flush()
+    import os
+    os._exit(0)
+
+# 设置超时保护
+def timeout_handler():
+    output_and_exit()
+
+timer = threading.Timer({timeout}, timeout_handler)
+timer.daemon = True
+timer.start()
+
+# 拦截常见的 GUI 主循环入口，防止进入事件循环
+_original_modules = {{}}
+
+class GUIBlocker:
+    """阻止 GUI 事件循环启动"""
+
+    @staticmethod
+    def block_tkinter():
+        try:
+            import tkinter
+            original_mainloop = tkinter.Tk.mainloop
+            def blocked_mainloop(self, n=0):
+                output_and_exit()
+            tkinter.Tk.mainloop = blocked_mainloop
+
+            # 也拦截 Misc.mainloop
+            if hasattr(tkinter, 'Misc'):
+                tkinter.Misc.mainloop = blocked_mainloop
+        except:
+            pass
+
+    @staticmethod
+    def block_pyqt():
+        for qt_module in ['PyQt6.QtWidgets', 'PyQt5.QtWidgets', 'PySide6.QtWidgets', 'PySide2.QtWidgets']:
+            try:
+                QtWidgets = importlib.import_module(qt_module)
+                original_exec = QtWidgets.QApplication.exec
+                def blocked_exec(self=None):
+                    output_and_exit()
+                QtWidgets.QApplication.exec = blocked_exec
+                QtWidgets.QApplication.exec_ = blocked_exec
+            except:
+                pass
+
+    @staticmethod
+    def block_wx():
+        try:
+            import wx
+            original_mainloop = wx.App.MainLoop
+            def blocked_mainloop(self):
+                output_and_exit()
+            wx.App.MainLoop = blocked_mainloop
+        except:
+            pass
+
+    @staticmethod
+    def block_pygame():
+        try:
+            import pygame
+            # pygame 没有显式的主循环，但我们可以在 display.flip 时退出
+            original_flip = pygame.display.flip
+            _flip_count = [0]
+            def blocked_flip():
+                _flip_count[0] += 1
+                if _flip_count[0] > 2:  # 允许几次初始化
+                    output_and_exit()
+                return original_flip()
+            pygame.display.flip = blocked_flip
+        except:
+            pass
+
+# 应用所有阻止器
+GUIBlocker.block_tkinter()
+GUIBlocker.block_pyqt()
+GUIBlocker.block_wx()
+GUIBlocker.block_pygame()
+
+try:
+    # 运行目标脚本
+    import runpy
+    runpy.run_path("{script_path}", run_name="__main__")
+except SystemExit:
+    pass
+except Exception as e:
+    pass
+finally:
+    timer.cancel()
+    output_and_exit()
+'''.format(
+            timeout=timeout - 2,
+            script_path=script_path.replace("\\", "\\\\")
+        )
+
+        # 写入临时文件
+        tracer_script = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.py',
+                delete=False,
+                encoding='utf-8'
+            ) as f:
+                f.write(tracer_code)
+                tracer_script = f.name
+
+            self.log(f"运行脚本进行动态追踪（超时: {timeout}秒）...")
+
+            # 设置工作目录
+            cwd = project_dir if project_dir else os.path.dirname(script_path)
+
+            # 运行追踪脚本
+            env = os.environ.copy()
+            if project_dir:
+                env['PYTHONPATH'] = project_dir
+
+            result = subprocess.run(
+                [python_path, tracer_script],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=env,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            # 解析输出
+            stdout = result.stdout
+            if "__IMPORTS_START__" in stdout and "__IMPORTS_END__" in stdout:
+                start = stdout.index("__IMPORTS_START__") + len("__IMPORTS_START__")
+                end = stdout.index("__IMPORTS_END__")
+                imports_json = stdout[start:end].strip()
+
+                import json
+                traced_imports = set(json.loads(imports_json))
+
+                # 过滤标准库和内部模块
+                filtered_imports = set()
+                for imp in traced_imports:
+                    root_module = imp.split('.')[0]
+                    if not self._is_stdlib(root_module):
+                        filtered_imports.add(imp)
+
+                self._dynamic_imports = filtered_imports
+                self.log(f"✓ 动态追踪成功！捕获到 {len(filtered_imports)} 个第三方模块导入")
+
+                # 显示部分结果
+                if filtered_imports:
+                    sample = sorted(list(filtered_imports))[:10]
+                    self.log(f"  示例: {', '.join(sample)}{'...' if len(filtered_imports) > 10 else ''}")
+
+                return True, filtered_imports
+            else:
+                self.log("⚠️ 动态追踪未能获取导入信息")
+                if result.stderr:
+                    self.log(f"  错误: {result.stderr[:200]}")
+                return False, set()
+
+        except subprocess.TimeoutExpired:
+            self.log(f"⚠️ 脚本运行超时（{timeout}秒）")
+            self.log("  可能是 GUI 程序或长时间运行的脚本，切换到通用策略")
+            # 尝试终止进程
+            try:
+                import psutil
+                for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        cmdline = proc.info.get('cmdline', [])
+                        if cmdline and tracer_script and tracer_script in ' '.join(cmdline):
+                            proc.terminate()
+                    except:
+                        pass
+            except:
+                pass
+            return False, set()
+        except Exception as e:
+            self.log(f"⚠️ 动态追踪失败: {str(e)}")
+            self.log("  将使用通用库自动支持策略")
+            return False, set()
+        finally:
+            # 清理临时文件
+            try:
+                if tracer_script and os.path.exists(tracer_script):
+                    os.unlink(tracer_script)
+            except:
+                pass
+
+    def check_script_runnable(
+        self,
+        script_path: str,
+        python_path: str,
+        project_dir: Optional[str] = None
+    ) -> bool:
+        """
+        检查脚本是否可以运行（快速语法检查+导入检查）
+
+        Returns:
+            True 如果脚本可以运行
+        """
+        self.log("\n检查脚本是否可运行...")
+
+        # 1. 语法检查
+        try:
+            with open(script_path, 'r', encoding='utf-8') as f:
+                source = f.read()
+            compile(source, script_path, 'exec')
+            self.log("  ✓ 语法检查通过")
+        except SyntaxError as e:
+            self.log(f"  ✗ 语法错误: {e}")
+            return False
+
+        # 2. 快速导入检查（只检查顶层导入）
+        check_code = f'''
+import sys
+sys.path.insert(0, r"{project_dir or os.path.dirname(script_path)}")
+try:
+    import ast
+    with open(r"{script_path}", "r", encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.append(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.append(node.module.split(".")[0])
+
+    # 尝试导入
+    failed = []
+    for imp in set(imports):
+        if imp in ["__future__"]:
+            continue
+        try:
+            __import__(imp)
+        except ImportError:
+            failed.append(imp)
+
+    if failed:
+        print("IMPORT_FAILED:" + ",".join(failed))
+        sys.exit(1)
+    else:
+        print("IMPORT_OK")
+        sys.exit(0)
+except Exception as e:
+    print(f"CHECK_ERROR:{{e}}")
+    sys.exit(1)
+'''
+
+        try:
+            result = subprocess.run(
+                [python_path, '-c', check_code],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            if "IMPORT_OK" in result.stdout:
+                self.log("  ✓ 导入检查通过")
+                return True
+            elif "IMPORT_FAILED" in result.stdout:
+                failed = result.stdout.split("IMPORT_FAILED:")[1].strip()
+                self.log(f"  ⚠️ 部分导入失败: {failed}")
+                self.log("  脚本可能无法完整运行，将使用混合策略")
+                return False
+            else:
+                self.log(f"  ⚠️ 检查结果未知")
+                return False
+
+        except subprocess.TimeoutExpired:
+            self.log("  ⚠️ 检查超时")
+            return False
+        except Exception as e:
+            self.log(f"  ⚠️ 检查失败: {e}")
+            return False
+
+    # ========== 通用库自动支持 ==========
+    def auto_collect_submodules(
+        self,
+        package_name: str,
+        python_path: str
+    ) -> List[str]:
+        """
+        自动收集包的所有子模块
+
+        Args:
+            package_name: 包名
+            python_path: Python解释器路径
+
+        Returns:
+            子模块列表
+        """
+        if package_name in self._auto_collected_modules:
+            return self._auto_collected_modules[package_name]
+
+        collect_code = f'''
+import sys
+import json
+import pkgutil
+import importlib
+
+try:
+    package = importlib.import_module("{package_name}")
+    submodules = ["{package_name}"]
+
+    if hasattr(package, "__path__"):
+        for importer, modname, ispkg in pkgutil.walk_packages(
+            package.__path__,
+            prefix=package.__name__ + "."
+        ):
+            submodules.append(modname)
+            # 限制数量，避免过多
+            if len(submodules) > 100:
+                break
+
+    print("__SUBMODULES__:" + json.dumps(submodules))
+except Exception as e:
+    print("__ERROR__:" + str(e))
+'''
+
+        try:
+            result = subprocess.run(
+                [python_path, '-c', collect_code],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            if "__SUBMODULES__:" in result.stdout:
+                import json
+                json_str = result.stdout.split("__SUBMODULES__:")[1].strip()
+                submodules = json.loads(json_str)
+                self._auto_collected_modules[package_name] = submodules
+                return submodules
+        except:
+            pass
+
+        # 失败时返回基本模块
+        return [package_name]
+
+    def collect_all_unconfigured_submodules(self, python_path: str) -> None:
+        """
+        收集所有未配置库的子模块
+
+        Args:
+            python_path: Python解释器路径
+        """
+        self.log("\n" + "=" * 50)
+        self.log("第二层防护：自动收集子模块")
+        self.log("=" * 50)
+
+        unconfigured = []
+        for dep in self.dependencies:
+            if self._is_stdlib(dep):
+                continue
+
+            dep_lower = dep.lower()
+            is_configured = (
+                dep in self.CONFIGURED_LIBRARIES or
+                dep_lower in {lib.lower() for lib in self.CONFIGURED_LIBRARIES}
+            )
+
+            if not is_configured:
+                unconfigured.append(dep)
+
+        if not unconfigured:
+            self.log("所有依赖都已有配置，无需自动收集")
+            return
+
+        self.log(f"发现 {len(unconfigured)} 个未配置的库，开始自动收集子模块:")
+
+        for dep in unconfigured:
+            self.log(f"\n  收集 {dep} 的子模块...")
+            submodules = self.auto_collect_submodules(dep, python_path)
+
+            if len(submodules) > 1:
+                self.log(f"    ✓ 收集到 {len(submodules)} 个子模块")
+            else:
+                self.log(f"    使用基础模块")
 
     def get_package_size_info(self, python_path: str) -> Dict[str, Dict[str, float]]:
         """

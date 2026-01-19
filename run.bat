@@ -85,24 +85,24 @@ exit /b %EXIT_CODE%
 :: ----------------------------------------------------
 
 :error_venv
-echo.
+    echo.
 echo [ERROR] Failed to create virtual environment.
 echo Please ensure 'python' is installed and added to your PATH.
-echo.
-pause
-exit /b 1
+    echo.
+    pause
+    exit /b 1
 
 :error_install
 echo.
 echo [ERROR] Failed to install dependencies.
 echo Please check your internet connection or requirements.txt.
-echo.
+    echo.
 pause
 exit /b 1
 
 :error_main
-echo.
+    echo.
 echo [ERROR] main.py not found in the current directory.
-echo.
-pause
+    echo.
+    pause
 exit /b 1

@@ -10,8 +10,10 @@ PyQt6最佳实践实现
 5. 模块化组件组织
 """
 
+import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -28,11 +30,13 @@ from PyQt6.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QAction, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,8 +46,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QTextBrowser,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -61,6 +65,9 @@ from gui.styles.themes import (
 from gui.widgets.icons import IconGenerator
 from utils.dependency_manager import DependencyManager
 from utils.gcc_downloader import GCCDownloader, validate_mingw_directory
+
+# 导入版本信息
+from version import APP_NAME, AUTHOR_EMAIL, get_about_html
 
 
 class MainWindow(QMainWindow):
@@ -105,7 +112,6 @@ class MainWindow(QMainWindow):
             os.makedirs(user_config_dir, exist_ok=True)
             config_dir = user_config_dir
         except Exception:
-            # 回退到应用目录
             config_dir = os.path.join(self.app_dir, "config")
             try:
                 os.makedirs(config_dir, exist_ok=True)
@@ -148,8 +154,18 @@ class MainWindow(QMainWindow):
         self.packaging_process: Optional[subprocess.Popen] = None
         self._current_packaging_worker: Optional[PackagingWorker] = None
 
-        # 跟踪之前的项目目录以进行变更检测
+        # 跟踪之前的项目目录和脚本路径以进行变更检测
         self._previous_project_dir: Optional[str] = None
+        self._previous_script_path: Optional[str] = None
+
+        # 版权信息
+        self.version_info = {
+            "product_name": "",
+            "company_name": "",
+            "file_description": "",
+            "copyright": "Copyright © 2026",
+            "version": "1.0.0",
+        }
 
     def _connect_signals(self) -> None:
         """连接应用程序信号到槽"""
@@ -235,6 +251,9 @@ class MainWindow(QMainWindow):
 
     def _init_ui(self) -> None:
         """初始化用户界面"""
+        # 创建菜单栏
+        self._create_menu_bar()
+
         central_widget = QWidget()
         central_widget.setObjectName("centralWidget")
         self.setCentralWidget(central_widget)
@@ -256,6 +275,316 @@ class MainWindow(QMainWindow):
         # Initial log message
         self.append_log("准备就绪...")
 
+    def _create_menu_bar(self) -> None:
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        if menubar is None:
+            return
+
+        # ===== 文件菜单 =====
+        file_menu = menubar.addMenu("文件")
+        if file_menu is None:
+            return
+
+        # 主题切换子菜单
+        theme_menu = QMenu("主题切换", self)
+
+        self.theme_system_action = QAction("🖥️ 跟随系统", self)
+        self.theme_system_action.setCheckable(True)
+        self.theme_system_action.setChecked(True)
+        self.theme_system_action.triggered.connect(lambda: self.set_theme(ThemeMode.SYSTEM))
+        theme_menu.addAction(self.theme_system_action)
+
+        self.theme_light_action = QAction("☀️ 浅色模式", self)
+        self.theme_light_action.setCheckable(True)
+        self.theme_light_action.triggered.connect(lambda: self.set_theme(ThemeMode.LIGHT))
+        theme_menu.addAction(self.theme_light_action)
+
+        self.theme_dark_action = QAction("🌙 深色模式", self)
+        self.theme_dark_action.setCheckable(True)
+        self.theme_dark_action.triggered.connect(lambda: self.set_theme(ThemeMode.DARK))
+        theme_menu.addAction(self.theme_dark_action)
+
+        file_menu.addMenu(theme_menu)
+        file_menu.addSeparator()
+
+        # 退出
+        exit_action = QAction("退出", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # ===== 帮助菜单 =====
+        help_menu = menubar.addMenu("帮助")
+        if help_menu is None:
+            return
+
+        # 问题反馈
+        feedback_action = QAction("问题反馈", self)
+        feedback_action.triggered.connect(self._show_feedback_dialog)
+        help_menu.addAction(feedback_action)
+
+        # 文澜书库
+        wklan_action = QAction("文澜书库", self)
+        wklan_action.triggered.connect(lambda: webbrowser.open("https://www.wklan.cn"))
+        help_menu.addAction(wklan_action)
+
+        # 关于
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_action)
+
+    def _show_feedback_dialog(self) -> None:
+        """显示问题反馈对话框"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("问题反馈")
+        dialog.setMinimumWidth(600)
+        dialog.setMinimumHeight(500)
+
+        # 应用与主窗口一致的样式
+        colors = self.theme_manager.colors
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {colors.background_primary};
+                color: {colors.text_primary};
+            }}
+            QLabel {{
+                color: {colors.text_primary};
+                background-color: transparent;
+            }}
+            QTextEdit {{
+                background-color: {colors.background_secondary};
+                border: 1px solid {colors.border_primary};
+                border-radius: 3px;
+                padding: 5px;
+                color: {colors.text_primary};
+            }}
+            QPushButton {{
+                background-color: {colors.accent_primary};
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {colors.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {colors.accent_pressed};
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+
+        # 软件信息
+        info_label = QLabel(f"<h3>{APP_NAME}</h3>")
+        layout.addWidget(info_label)
+
+        # 获取当前配置信息
+        config = self.get_config()
+        config_text = f"""
+<b>当前打包配置：</b><br>
+- 打包工具: {config.get('tool', 'N/A')}<br>
+- 单文件模式: {'是' if config.get('onefile') else '否'}<br>
+- 显示控制台: {'是' if config.get('console') else '否'}<br>
+- 清理构建缓存: {'是' if config.get('clean') else '否'}<br>
+- 使用UPX压缩: {'是' if config.get('upx') else '否'}<br>
+- 脚本路径: {config.get('script_path') or 'N/A'}<br>
+- 项目目录: {config.get('project_dir') or 'N/A'}<br>
+- 输出目录: {config.get('output_dir') or 'N/A'}<br>
+"""
+        config_label = QLabel(config_text)
+        config_label.setWordWrap(True)
+        layout.addWidget(config_label)
+
+        # 日志信息
+        log_label = QLabel("<b>日志输出：</b>")
+        layout.addWidget(log_label)
+
+        log_text = QTextEdit()
+        log_text.setReadOnly(True)
+        log_text.setPlainText(self.log_text.toPlainText())
+        log_text.setMaximumHeight(200)
+        layout.addWidget(log_text)
+
+        # 作者邮箱
+        email_label = QLabel(f"<br><b>作者邮箱：</b> {AUTHOR_EMAIL}")
+        email_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        email_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+
+        def show_email_context_menu(pos):
+            """显示邮箱的中文右键菜单"""
+            context_menu = QMenu(email_label)
+
+            # 设置菜单样式
+            context_menu.setStyleSheet(f"""
+                QMenu {{
+                    background-color: {colors.background_secondary};
+                    border: 1px solid {colors.border_primary};
+                    color: {colors.text_primary};
+                }}
+                QMenu::item {{
+                    padding: 5px 20px;
+                    background-color: {colors.background_secondary};
+                    color: {colors.text_primary};
+                }}
+                QMenu::item:selected {{
+                    background-color: {colors.accent_primary};
+                    color: white;
+                }}
+            """)
+
+            # 复制动作
+            copy_action = QAction("复制", email_label)
+            copy_action.triggered.connect(lambda: self._copy_selected_text(email_label))
+            context_menu.addAction(copy_action)
+
+            context_menu.exec(email_label.mapToGlobal(pos))
+
+        email_label.customContextMenuRequested.connect(show_email_context_menu)
+        layout.addWidget(email_label)
+
+        # 提示信息
+        tip_label = QLabel("<br><i>请将以上信息复制后发送到邮箱，以便我们更好地帮助您解决问题。</i>")
+        tip_label.setWordWrap(True)
+        layout.addWidget(tip_label)
+
+        # 按钮区
+        btn_layout = QHBoxLayout()
+
+        # 一键复制按钮
+        copy_btn = QPushButton("一键复制")
+        def copy_all():
+            full_text = f"""{APP_NAME} - 问题反馈
+
+当前打包配置：
+- 打包工具: {config.get('tool', 'N/A')}
+- 单文件模式: {'是' if config.get('onefile') else '否'}
+- 显示控制台: {'是' if config.get('console') else '否'}
+- 清理构建缓存: {'是' if config.get('clean') else '否'}
+- 使用UPX压缩: {'是' if config.get('upx') else '否'}
+- 脚本路径: {config.get('script_path') or 'N/A'}
+- 项目目录: {config.get('project_dir') or 'N/A'}
+- 输出目录: {config.get('output_dir') or 'N/A'}
+
+日志输出：
+{self.log_text.toPlainText()}
+"""
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setText(full_text)
+                QMessageBox.information(dialog, "提示", "已复制到剪贴板！")
+
+        copy_btn.clicked.connect(copy_all)
+        btn_layout.addWidget(copy_btn)
+
+        btn_layout.addStretch()
+
+        close_btn = QPushButton("关闭")
+        close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.background_tertiary};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {colors.border_secondary};
+            }}
+        """)
+        close_btn.clicked.connect(dialog.close)
+        btn_layout.addWidget(close_btn)
+
+        layout.addLayout(btn_layout)
+        dialog.exec()
+
+    def _copy_selected_text(self, label: QLabel) -> None:
+        """复制标签中选中的文本到剪贴板"""
+        selected_text = label.selectedText()
+        if selected_text:
+            clipboard = QApplication.clipboard()
+            if clipboard:
+                clipboard.setText(selected_text)
+
+    def _show_about_dialog(self) -> None:
+        """显示关于对话框（支持文本复制）"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("关于")
+        dialog.setMinimumWidth(500)
+        dialog.setMinimumHeight(350)
+
+        # 设置对话框图标（与主窗口一致）
+        dialog.setWindowIcon(self.windowIcon())
+
+        # 应用与主窗口一致的样式
+        colors = self.theme_manager.colors
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {colors.background_primary};
+                color: {colors.text_primary};
+            }}
+            QLabel {{
+                color: {colors.text_primary};
+                background-color: transparent;
+            }}
+            QTextBrowser {{
+                background-color: {colors.background_secondary};
+                border: 1px solid {colors.border_primary};
+                border-radius: 3px;
+                padding: 10px;
+                color: {colors.text_primary};
+            }}
+            QPushButton {{
+                background-color: {colors.accent_primary};
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {colors.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {colors.accent_pressed};
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+
+        # 顶部图标和标题区域
+        top_layout = QHBoxLayout()
+
+        # 添加应用图标
+        icon_label = QLabel()
+        icon_pixmap = self.windowIcon().pixmap(64, 64)  # 64x64 图标
+        if not icon_pixmap.isNull():
+            icon_label.setPixmap(icon_pixmap)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        top_layout.addWidget(icon_label)
+
+        top_layout.addSpacing(10)
+
+        # 使用 QTextBrowser 显示内容，支持选择和复制
+        text_browser = QTextBrowser()
+        text_browser.setOpenExternalLinks(False)
+        text_browser.setHtml(get_about_html())
+        text_browser.setMinimumHeight(150)
+        top_layout.addWidget(text_browser)
+
+        layout.addLayout(top_layout)
+
+        # 关闭按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dialog.close)
+        btn_layout.addWidget(close_btn)
+
+        layout.addLayout(btn_layout)
+        dialog.exec()
+
     def _create_file_selection_group(self, parent_layout: QVBoxLayout) -> None:
         """创建文件选择组"""
         file_group = QGroupBox("文件选择")
@@ -269,6 +598,7 @@ class MainWindow(QMainWindow):
         self.project_dir_edit.textChanged.connect(self.on_project_dir_changed)
         project_layout.addWidget(self.project_dir_edit)
         project_btn = QPushButton("浏览")
+        project_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         project_btn.clicked.connect(self.browse_project_dir)
         project_layout.addWidget(project_btn)
         file_layout.addLayout(project_layout)
@@ -281,6 +611,7 @@ class MainWindow(QMainWindow):
         self.script_path_edit.textChanged.connect(self.on_script_path_changed)
         script_layout.addWidget(self.script_path_edit)
         script_btn = QPushButton("浏览")
+        script_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         script_btn.clicked.connect(self.browse_script)
         script_layout.addWidget(script_btn)
         file_layout.addLayout(script_layout)
@@ -292,6 +623,7 @@ class MainWindow(QMainWindow):
         self.output_dir_edit.setPlaceholderText("可选，默认为项目目录下的build文件夹")
         output_layout.addWidget(self.output_dir_edit)
         output_btn = QPushButton("浏览")
+        output_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         output_btn.clicked.connect(self.browse_output_dir)
         output_layout.addWidget(output_btn)
         file_layout.addLayout(output_layout)
@@ -303,6 +635,7 @@ class MainWindow(QMainWindow):
         self.icon_path_edit.setPlaceholderText("可选，支持 .ico/.png/.svg 等格式，自动转换为多尺寸图标")
         icon_layout.addWidget(self.icon_path_edit)
         icon_btn = QPushButton("浏览")
+        icon_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         icon_btn.clicked.connect(self.browse_icon)
         icon_layout.addWidget(icon_btn)
         file_layout.addLayout(icon_layout)
@@ -322,6 +655,7 @@ class MainWindow(QMainWindow):
         self.python_path_edit.setPlaceholderText("可选，留空将自动检测系统Python")
         python_layout.addWidget(self.python_path_edit)
         python_btn = QPushButton("浏览")
+        python_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         python_btn.clicked.connect(self.browse_python)
         python_layout.addWidget(python_btn)
         file_layout.addLayout(python_layout)
@@ -358,6 +692,7 @@ class MainWindow(QMainWindow):
         self.gcc_path_edit.textChanged.connect(self.on_gcc_path_changed)
         gcc_layout.addWidget(self.gcc_path_edit)
         self.gcc_browse_btn = QPushButton("浏览")
+        self.gcc_browse_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         self.gcc_browse_btn.clicked.connect(self.browse_gcc)
         gcc_layout.addWidget(self.gcc_browse_btn)
         self.gcc_download_btn = QPushButton("自动下载")
@@ -398,26 +733,21 @@ class MainWindow(QMainWindow):
         self.upx_check.setChecked(True)
         self.upx_check.setToolTip("压缩exe体积（需安装UPX）")
 
-        self.lto_check = QCheckBox("启用LTO链接优化")
-        self.lto_check.setChecked(True)
-        self.lto_check.setToolTip("启用链接时优化，减小体积并提升性能（仅Nuitka）")
-        self.lto_check.setVisible(False)
-
-        self.python_opt_check = QCheckBox("启用Python优化")
-        self.python_opt_check.setChecked(True)
-        self.python_opt_check.setToolTip("启用Python字节码优化（-O参数）")
-
         self.console_check = QCheckBox("显示控制台窗口")
         self.console_check.setChecked(False)
         self.console_check.setToolTip("运行时是否显示CMD窗口")
+
+        self.version_info_check = QCheckBox("添加版权信息")
+        self.version_info_check.setChecked(False)
+        self.version_info_check.setToolTip("配置软件版权、公司等信息")
+        self.version_info_check.clicked.connect(self._on_version_info_check_clicked)
 
         checkboxes_layout.addWidget(self.onefile_check)
         checkboxes_layout.addWidget(self.clean_check)
         checkboxes_layout.addWidget(self.venv_check)
         checkboxes_layout.addWidget(self.upx_check)
-        checkboxes_layout.addWidget(self.lto_check)
-        checkboxes_layout.addWidget(self.python_opt_check)
         checkboxes_layout.addWidget(self.console_check)
+        checkboxes_layout.addWidget(self.version_info_check)
         checkboxes_layout.addStretch()
 
         options_layout.addLayout(checkboxes_layout)
@@ -433,6 +763,7 @@ class MainWindow(QMainWindow):
 
         self.analyze_btn = QPushButton("分析依赖")
         self.analyze_btn.setMinimumHeight(35)
+        self.analyze_btn.setStyleSheet("QPushButton { min-width: 0; }")  # 覆盖全局样式，让按钮宽度适应文字
         self.analyze_btn.clicked.connect(self.analyze_dependencies)
         exclude_layout.addWidget(self.analyze_btn)
 
@@ -455,29 +786,13 @@ class MainWindow(QMainWindow):
         """Create bottom button bar"""
         btn_layout = QHBoxLayout()
 
-        # Theme button with menu
-        self.theme_btn = QToolButton()
-        self.theme_btn.setText("🌓 主题")
-        self.theme_btn.setToolTip("切换主题模式")
-        self.theme_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.theme_btn.setMinimumHeight(40)
-
-        theme_menu = QMenu(self)
-        self.theme_system_action = theme_menu.addAction("🖥️ 跟随系统")
-        self.theme_system_action.setCheckable(True)
-        self.theme_system_action.setChecked(True)
-        self.theme_system_action.triggered.connect(lambda: self.set_theme(ThemeMode.SYSTEM))
-
-        self.theme_light_action = theme_menu.addAction("☀️ 浅色模式")
-        self.theme_light_action.setCheckable(True)
-        self.theme_light_action.triggered.connect(lambda: self.set_theme(ThemeMode.LIGHT))
-
-        self.theme_dark_action = theme_menu.addAction("🌙 深色模式")
-        self.theme_dark_action.setCheckable(True)
-        self.theme_dark_action.triggered.connect(lambda: self.set_theme(ThemeMode.DARK))
-
-        self.theme_btn.setMenu(theme_menu)
-        btn_layout.addWidget(self.theme_btn)
+        # 问题反馈文字链接（左侧）
+        colors = self.theme_manager.colors
+        self.feedback_label = QLabel(f'<a href="#" style="text-decoration: none; color: {colors.text_primary};">问题反馈</a>')
+        self.feedback_label.setOpenExternalLinks(False)
+        self.feedback_label.linkActivated.connect(lambda: self._show_feedback_dialog())
+        self.feedback_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_layout.addWidget(self.feedback_label)
 
         btn_layout.addStretch()
 
@@ -491,11 +806,320 @@ class MainWindow(QMainWindow):
         self.clear_btn.setMinimumHeight(40)
         self.clear_btn.setMinimumWidth(120)
         self.clear_btn.clicked.connect(self.clear_log)
+        # 设置清空日志按钮为灰色背景
+        self.clear_btn.setProperty("buttonType", "secondary")
 
-        btn_layout.addWidget(self.package_btn)
+        # 先添加清空日志按钮，再添加开始打包按钮
         btn_layout.addWidget(self.clear_btn)
+        btn_layout.addWidget(self.package_btn)
 
         parent_layout.addLayout(btn_layout)
+
+    def _on_version_info_check_clicked(self, checked: bool) -> None:
+        """版权信息复选框被点击时触发（使用 clicked 信号更可靠）"""
+        if checked:
+            # 显示对话框
+            self._show_version_info_dialog()
+
+    def _detect_version_info_from_project(self) -> Dict[str, str]:
+        """
+        从项目目录中的 version.py 或 main.py 检测版本信息。
+
+        返回检测到的版本信息字典，未检测到的字段为空字符串。
+        """
+        detected_info: Dict[str, str] = {
+            "product_name": "",
+            "product_name_en": "",
+            "company_name": "",
+            "file_description": "",
+            "file_description_en": "",
+            "copyright": "",
+            "version": "",
+        }
+
+        # 获取项目目录
+        project_dir = self.project_dir_edit.text().strip() if hasattr(self, 'project_dir_edit') else ""
+        if not project_dir or not os.path.isdir(project_dir):
+            return detected_info
+
+        # 尝试查找 version.py 或 main.py
+        version_files = ["version.py", "main.py"]
+        target_file = None
+
+        for vf in version_files:
+            vf_path = os.path.join(project_dir, vf)
+            if os.path.exists(vf_path):
+                target_file = vf_path
+                break
+
+        if not target_file:
+            return detected_info
+
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            # 提取 __version__
+            match = re.search(r'__version__\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["version"] = match.group(1)
+
+            # 提取 COPYRIGHT
+            match = re.search(r'COPYRIGHT\s*=\s*[f]?[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["copyright"] = match.group(1)
+
+            # 提取 APP_NAME
+            match = re.search(r'APP_NAME\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["product_name"] = match.group(1)
+
+            # 提取 APP_NAME_EN
+            match = re.search(r'APP_NAME_EN\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["product_name_en"] = match.group(1)
+
+            # 提取 DESCRIPTION
+            match = re.search(r'(?<!_)DESCRIPTION\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["file_description"] = match.group(1)
+
+            # 提取 DESCRIPTION_EN
+            match = re.search(r'DESCRIPTION_EN\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+            if match:
+                detected_info["file_description_en"] = match.group(1)
+
+            # 提取 AUTHOR（用于解析动态 COPYRIGHT）
+            if not detected_info["copyright"] or "{AUTHOR}" in detected_info["copyright"]:
+                match = re.search(r'AUTHOR\s*=\s*[\'"]([^\'"]+)[\'"]', content)
+                if match:
+                    author = match.group(1)
+                    year = datetime.datetime.now().year
+                    detected_info["copyright"] = f"Copyright © {year} {author}"
+
+        except Exception:
+            pass
+
+        return detected_info
+
+    def _show_version_info_dialog(self) -> None:
+        """显示版权信息配置对话框"""
+        # 尝试从项目目录检测版本信息
+        detected_info = self._detect_version_info_from_project()
+
+        # 检查是否为 Nuitka 打包（影响是否使用中文）
+        is_nuitka = self.nuitka_radio.isChecked()
+
+        # 检测 Windows SDK 支持（用于 Nuitka 中文版本信息）
+        sdk_supported = False
+        sdk_message = ""
+        if is_nuitka:
+            from core.packager import Packager
+            temp_packager = Packager()
+            sdk_supported, sdk_message = temp_packager.check_windows_sdk_support()
+
+        # 根据打包方式和 SDK 支持决定使用中文还是英文
+        # Nuitka 默认使用英文，除非检测到 Windows SDK
+        use_english = is_nuitka and not sdk_supported
+
+        # 合并检测到的信息和现有信息
+        # 如果当前版本信息为空，则使用检测到的值
+        if not self.version_info.get("product_name"):
+            if use_english and detected_info.get("product_name_en"):
+                self.version_info["product_name"] = detected_info["product_name_en"]
+            elif detected_info.get("product_name"):
+                self.version_info["product_name"] = detected_info["product_name"]
+            elif detected_info.get("product_name_en"):
+                self.version_info["product_name"] = detected_info["product_name_en"]
+
+        if not self.version_info.get("file_description"):
+            if use_english and detected_info.get("file_description_en"):
+                self.version_info["file_description"] = detected_info["file_description_en"]
+            elif detected_info.get("file_description"):
+                self.version_info["file_description"] = detected_info["file_description"]
+            elif detected_info.get("file_description_en"):
+                self.version_info["file_description"] = detected_info["file_description_en"]
+
+        if not self.version_info.get("copyright") or self.version_info.get("copyright") == "Copyright © 2026":
+            if detected_info.get("copyright"):
+                self.version_info["copyright"] = detected_info["copyright"]
+
+        if not self.version_info.get("version") or self.version_info.get("version") == "1.0.0":
+            if detected_info.get("version"):
+                self.version_info["version"] = detected_info["version"]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("添加版权信息")
+        dialog.setMinimumWidth(450)
+
+        # 设置对话框标志，确保不会影响父窗口
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        # 应用与主窗口一致的样式
+        colors = self.theme_manager.colors
+        dialog.setStyleSheet(f"""
+            QDialog {{
+                background-color: {colors.background_primary};
+                color: {colors.text_primary};
+            }}
+            QLabel {{
+                color: {colors.text_primary};
+                background-color: transparent;
+            }}
+            QLineEdit {{
+                background-color: {colors.background_secondary};
+                border: 1px solid {colors.border_primary};
+                border-radius: 3px;
+                padding: 5px;
+                color: {colors.text_primary};
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {colors.accent_primary};
+            }}
+            QPushButton {{
+                background-color: {colors.accent_primary};
+                color: white;
+                border: none;
+                border-radius: 3px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }}
+            QPushButton:hover {{
+                background-color: {colors.accent_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {colors.accent_pressed};
+            }}
+        """)
+
+        layout = QVBoxLayout(dialog)
+
+        # 检查是否为Nuitka打包方式，如果是则显示提示
+        if is_nuitka:
+            if sdk_supported:
+                # 检测到 Windows SDK，支持中文
+                tip_label = QLabel(f"""
+<b>✓ 支持中文版本信息</b><br>
+{sdk_message}<br>
+<span style="color: {colors.success};">您可以填写中文信息，系统将自动处理。</span>
+                """)
+                tip_label.setWordWrap(True)
+                tip_label.setStyleSheet(f"""
+                    QLabel {{
+                        background-color: {colors.background_secondary};
+                        border: 1px solid {colors.success};
+                        border-radius: 5px;
+                        padding: 10px;
+                        color: {colors.text_primary};
+                    }}
+                """)
+            else:
+                # 未检测到 Windows SDK，建议使用英文
+                tip_label = QLabel(f"""
+<b>提示：</b><br>当前Nuitka打包默认请填写英文信息。<br>
+{sdk_message}<br><br>
+如需支持中文信息，请先安装以下任一组件：<br>
+• <b>Windows SDK</b> (推荐)<br>
+• <b>Visual Studio Build Tools</b><br>
+• <b>Visual Studio</b> (任意版本)
+                """)
+                tip_label.setWordWrap(True)
+                tip_label.setStyleSheet(f"""
+                    QLabel {{
+                        background-color: {colors.background_secondary};
+                        border: 1px solid {colors.border_primary};
+                        border-radius: 5px;
+                        padding: 10px;
+                        color: {colors.text_primary};
+                    }}
+                """)
+            layout.addWidget(tip_label)
+            layout.addSpacing(10)
+
+        # 显示检测到版本信息的提示
+        if any(detected_info.values()):
+            detect_tip = QLabel("✓ 已从项目 version.py 中检测到版本信息")
+            detect_tip.setStyleSheet(f"color: {colors.success}; font-size: 12px;")
+            layout.addWidget(detect_tip)
+            layout.addSpacing(5)
+
+        # 表单布局
+        form_layout = QFormLayout()
+
+        # 产品名称
+        self.version_product_name_edit = QLineEdit()
+        self.version_product_name_edit.setText(self.version_info.get("product_name", ""))
+        self.version_product_name_edit.setPlaceholderText("e.g. My Application")
+        form_layout.addRow("产品名称:", self.version_product_name_edit)
+
+        # 公司名称
+        self.version_company_name_edit = QLineEdit()
+        self.version_company_name_edit.setText(self.version_info.get("company_name", ""))
+        self.version_company_name_edit.setPlaceholderText("e.g. XXX Tech Co., Ltd.")
+        form_layout.addRow("公司名称:", self.version_company_name_edit)
+
+        # 文件描述
+        self.version_file_desc_edit = QLineEdit()
+        self.version_file_desc_edit.setText(self.version_info.get("file_description", ""))
+        self.version_file_desc_edit.setPlaceholderText("e.g. This is a useful tool")
+        form_layout.addRow("文件描述:", self.version_file_desc_edit)
+
+        # 版权信息
+        self.version_copyright_edit = QLineEdit()
+        self.version_copyright_edit.setText(self.version_info.get("copyright", "Copyright © 2026"))
+        self.version_copyright_edit.setPlaceholderText("e.g. Copyright © 2024 XXX Company")
+        form_layout.addRow("版权信息:", self.version_copyright_edit)
+
+        # 版本号
+        self.version_version_edit = QLineEdit()
+        self.version_version_edit.setText(self.version_info.get("version", "1.0.0"))
+        self.version_version_edit.setPlaceholderText("e.g. 1.0.0")
+        form_layout.addRow("版本号:", self.version_version_edit)
+
+        layout.addLayout(form_layout)
+
+        # 按钮（使用中文按钮）
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        ok_btn = QPushButton("确定")
+        ok_btn.clicked.connect(dialog.accept)
+        btn_layout.addWidget(ok_btn)
+
+        cancel_btn = QPushButton("取消")
+        cancel_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {colors.background_tertiary};
+                color: {colors.text_primary};
+                border: 1px solid {colors.border_primary};
+            }}
+            QPushButton:hover {{
+                background-color: {colors.border_secondary};
+            }}
+        """)
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+
+        # 显示对话框并处理结果
+        result = dialog.exec()
+
+        # 处理对话框结果
+        if result == QDialog.DialogCode.Accepted:
+            # 保存版权信息
+            self.version_info = {
+                "product_name": self.version_product_name_edit.text().strip(),
+                "company_name": self.version_company_name_edit.text().strip(),
+                "file_description": self.version_file_desc_edit.text().strip(),
+                "copyright": self.version_copyright_edit.text().strip(),
+                "version": self.version_version_edit.text().strip() or "1.0.0",
+            }
+            self.append_log(f"已配置版权信息: {self.version_info.get('product_name', 'N/A')}")
+        else:
+            # 用户取消，直接取消勾选
+            # clicked 信号只在用户点击时触发，setChecked 不会触发，所以无需 blockSignals
+            self.version_info_check.setChecked(False)
 
     def _set_window_icon(self) -> None:
         """设置窗口图标"""
@@ -540,13 +1164,6 @@ class MainWindow(QMainWindow):
         self._save_theme_setting()
         self.apply_theme()
 
-        mode_names = {
-            ThemeMode.SYSTEM: "跟随系统",
-            ThemeMode.LIGHT: "浅色",
-            ThemeMode.DARK: "深色",
-        }
-        self.append_log(f"已切换到{mode_names[mode]}主题")
-
     def apply_theme(self) -> None:
         """将当前主题应用到界面"""
         app = QApplication.instance()
@@ -555,13 +1172,13 @@ class MainWindow(QMainWindow):
 
         is_dark = self.theme_manager.is_dark
 
-        # 根据主题获取图标路径（使用简化的文件名）
+        # 根据主题获取图标路径（从resources/icons目录）
         if is_dark:
-            check_icon = self.icon_generator.get_icon_path("check_dark.png")
-            radio_icon = self.icon_generator.get_icon_path("radio_dark.png")
+            check_icon = self.icon_generator.get_icon_path("resources/icons/check_dark.png")
+            radio_icon = self.icon_generator.get_icon_path("resources/icons/radio_dark.png")
         else:
-            check_icon = self.icon_generator.get_icon_path("check_light.png")
-            radio_icon = self.icon_generator.get_icon_path("radio_light.png")
+            check_icon = self.icon_generator.get_icon_path("resources/icons/check_light.png")
+            radio_icon = self.icon_generator.get_icon_path("resources/icons/radio_light.png")
 
         # 应用样式表
         stylesheet = self.theme_manager.get_stylesheet(check_icon, radio_icon)
@@ -572,20 +1189,18 @@ class MainWindow(QMainWindow):
             color = self.theme_manager.get_label_color("warning" if is_dark else "accent")
             self.gcc_download_label.setStyleSheet(f"color: {color};")
 
+        # 更新问题反馈文字颜色
+        if hasattr(self, 'feedback_label'):
+            colors = self.theme_manager.colors
+            self.feedback_label.setText(f'<a href="#" style="text-decoration: none; color: {colors.text_primary};">问题反馈</a>')
+
     def _update_theme_button_state(self) -> None:
-        """更新主题按钮状态以反映当前设置"""
+        """更新主题菜单状态以反映当前设置"""
         mode = self.theme_manager.current_mode
 
         self.theme_system_action.setChecked(mode == ThemeMode.SYSTEM)
         self.theme_light_action.setChecked(mode == ThemeMode.LIGHT)
         self.theme_dark_action.setChecked(mode == ThemeMode.DARK)
-
-        button_texts = {
-            ThemeMode.SYSTEM: "🌓 主题",
-            ThemeMode.LIGHT: "☀️ 浅色",
-            ThemeMode.DARK: "🌙 深色",
-        }
-        self.theme_btn.setText(button_texts[mode])
 
     def _load_theme_setting(self) -> None:
         """从配置文件加载主题设置"""
@@ -649,7 +1264,8 @@ class MainWindow(QMainWindow):
         """浏览项目目录"""
         path = QFileDialog.getExistingDirectory(self, "选择项目目录")
         if path:
-            self.project_dir_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.project_dir_edit.setText(os.path.normpath(path))
 
     def browse_script(self) -> None:
         """浏览脚本文件"""
@@ -657,13 +1273,15 @@ class MainWindow(QMainWindow):
             self, "选择运行脚本", "", "Python Files (*.py);;All Files (*)"
         )
         if path:
-            self.script_path_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.script_path_edit.setText(os.path.normpath(path))
 
     def browse_output_dir(self) -> None:
         """浏览输出目录"""
         path = QFileDialog.getExistingDirectory(self, "选择输出目录")
         if path:
-            self.output_dir_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.output_dir_edit.setText(os.path.normpath(path))
 
     def browse_icon(self) -> None:
         """浏览图标文件"""
@@ -672,7 +1290,8 @@ class MainWindow(QMainWindow):
             "Icon Files (*.ico *.png *.svg *.jpg *.jpeg *.bmp);;All Files (*)"
         )
         if path:
-            self.icon_path_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.icon_path_edit.setText(os.path.normpath(path))
 
     def browse_python(self) -> None:
         """浏览Python可执行文件"""
@@ -680,7 +1299,8 @@ class MainWindow(QMainWindow):
             self, "选择Python解释器", "", "Executable (*.exe);;All Files (*)"
         )
         if path:
-            self.python_path_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.python_path_edit.setText(os.path.normpath(path))
 
     def browse_gcc(self) -> None:
         """浏览GCC工具链（mingw64或mingw32目录）"""
@@ -701,7 +1321,8 @@ class MainWindow(QMainWindow):
                     "该目录应包含 bin 子目录，且 bin 目录下应存在 gcc.exe、g++.exe 等文件。",
                 )
                 return
-            self.gcc_path_edit.setText(path)
+            # 规范化路径，统一使用系统默认的路径分隔符
+            self.gcc_path_edit.setText(os.path.normpath(path))
             self._show_info("验证通过", "GCC工具链目录验证通过！")
 
     # =========================================================================
@@ -713,6 +1334,9 @@ class MainWindow(QMainWindow):
         project_dir = text.strip()
         if not project_dir or not os.path.isdir(project_dir):
             return
+
+        # 规范化项目目录路径，统一使用系统默认的路径分隔符
+        project_dir = os.path.normpath(project_dir)
 
         # Check if project directory actually changed
         if project_dir == self._previous_project_dir:
@@ -729,17 +1353,27 @@ class MainWindow(QMainWindow):
         script_found = False
         for script in possible_scripts:
             script_path = os.path.join(project_dir, script)
+            script_path = os.path.normpath(script_path)  # 规范化路径
             if os.path.exists(script_path):
+                # 阻止信号避免触发 on_script_path_changed
+                self.script_path_edit.blockSignals(True)
                 self.script_path_edit.setText(script_path)
+                self.script_path_edit.blockSignals(False)
+                # 手动更新 _previous_script_path
+                self._previous_script_path = script_path
                 script_found = True
                 break
 
         # If no common script found, clear the field
         if not script_found:
+            self.script_path_edit.blockSignals(True)
             self.script_path_edit.clear()
+            self.script_path_edit.blockSignals(False)
+            self._previous_script_path = None
 
         # Set output directory - always update when project dir changes
-        self.output_dir_edit.setText(os.path.join(project_dir, "build"))
+        output_path = os.path.normpath(os.path.join(project_dir, "build"))
+        self.output_dir_edit.setText(output_path)
 
         # Set program name from directory name - always update when project dir changes
         dir_name = os.path.basename(project_dir)
@@ -750,44 +1384,112 @@ class MainWindow(QMainWindow):
         self._auto_load_project_icon(project_dir, force_update=True)
 
     def _auto_load_project_icon(self, project_dir: str, force_update: bool = False) -> None:
-        """Auto-load ico icon from project directory
+        """Auto-load icon from project directory with multiple formats and locations
 
         Priority:
-        1. icon.ico (if exists)
-        2. Any other .ico file found
+        1. icon.ico in project root
+        2. app.ico in project root
+        3. logo.ico in project root
+        4. Any .ico file in project root (first one found)
+        5. icon.png in project root
+        6. app.png in project root
+        7. logo.png in project root
+        8. Any .png file in project root (first one found)
+        9. resources/icons/icon.ico
+        10. resources/icon.ico
+        11. icons/icon.ico
+        12. Any other supported formats (.svg, etc.)
 
         Args:
-            project_dir: The project directory to search for icons
-            force_update: If True, always update even if icon path is already set
+            project_dir: 项目目录
+            force_update: 是否强制更新（忽略现有设置）
         """
         # Skip if icon path is already set and not forcing update
         if not force_update and self.icon_path_edit.text().strip():
             return
 
         try:
-            ico_files = []
+            # 支持的图标格式
+            icon_formats = {'.ico', '.png', '.svg', '.bmp', '.jpg', '.jpeg'}
+
+            # 搜索优先级：按顺序的文件名和目录
+            search_patterns = [
+                # 项目根目录，优先级排序
+                ('icon.ico', project_dir),
+                ('app.ico', project_dir),
+                ('logo.ico', project_dir),
+                ('Icon.ico', project_dir),
+                ('APP.ico', project_dir),
+                ('LOGO.ico', project_dir),
+                ('icon.png', project_dir),
+                ('app.png', project_dir),
+                ('logo.png', project_dir),
+                ('Icon.png', project_dir),
+                ('APP.png', project_dir),
+                ('LOGO.png', project_dir),
+                # 常见的资源目录
+                ('icon.ico', os.path.join(project_dir, 'resources', 'icons')),
+                ('icon.png', os.path.join(project_dir, 'resources', 'icons')),
+                ('icon.ico', os.path.join(project_dir, 'resources')),
+                ('icon.png', os.path.join(project_dir, 'resources')),
+                ('icon.ico', os.path.join(project_dir, 'icons')),
+                ('icon.png', os.path.join(project_dir, 'icons')),
+                ('icon.ico', os.path.join(project_dir, 'assets')),
+                ('icon.png', os.path.join(project_dir, 'assets')),
+            ]
+
+            # 首先检查特定的文件名
+            for filename, search_dir in search_patterns:
+                icon_path = os.path.join(search_dir, filename)
+                icon_path = os.path.normpath(icon_path)  # 规范化路径
+                if os.path.exists(icon_path) and os.path.isfile(icon_path):
+                    self.icon_path_edit.setText(icon_path)
+                    rel_path = os.path.relpath(icon_path, project_dir)
+                    self.append_log(f"已自动加载程序图标: {rel_path}")
+                    return
+
+            # 如果没有找到特定文件名，则在项目根目录中搜索任何支持的格式
+            found_files = {}
             for item in os.listdir(project_dir):
-                if item.lower().endswith('.ico'):
-                    ico_files.append(item)
+                item_path = os.path.join(project_dir, item)
+                if os.path.isfile(item_path):
+                    _, ext = os.path.splitext(item.lower())
+                    if ext in icon_formats:
+                        # 按格式优先级分类 (.ico > .png > others)
+                        if ext not in found_files:
+                            found_files[ext] = []
+                        found_files[ext].append(item_path)
 
-            if not ico_files:
-                return
+            # 按优先级选择格式
+            for ext in ['.ico', '.png', '.svg', '.bmp', '.jpg', '.jpeg']:
+                if ext in found_files and found_files[ext]:
+                    icon_path = found_files[ext][0]  # 取该格式的第一个文件
+                    icon_path = os.path.normpath(icon_path)  # 规范化路径
+                    self.icon_path_edit.setText(icon_path)
+                    rel_path = os.path.relpath(icon_path, project_dir)
+                    self.append_log(f"已自动加载程序图标: {rel_path}")
+                    return
 
-            # Priority: icon.ico first
-            selected_icon = None
-            for ico in ico_files:
-                if ico.lower() == 'icon.ico':
-                    selected_icon = ico
-                    break
+            # 如果还没找到，搜索常见目录
+            common_dirs = [
+                os.path.join(project_dir, 'resources', 'icons'),
+                os.path.join(project_dir, 'resources'),
+                os.path.join(project_dir, 'icons'),
+                os.path.join(project_dir, 'assets'),
+            ]
 
-            # If no icon.ico, use the first one found
-            if not selected_icon:
-                selected_icon = ico_files[0]
-
-            icon_path = os.path.join(project_dir, selected_icon)
-            self.icon_path_edit.setText(icon_path)
-            self.append_log(f"已自动加载程序图标: {selected_icon}")
-            return
+            for search_dir in common_dirs:
+                if os.path.exists(search_dir) and os.path.isdir(search_dir):
+                    for item in os.listdir(search_dir):
+                        item_path = os.path.join(search_dir, item)
+                        item_path = os.path.normpath(item_path)  # 规范化路径
+                        if os.path.isfile(item_path):
+                            _, ext = os.path.splitext(item.lower())
+                            if ext in icon_formats:
+                                self.icon_path_edit.setText(item_path)
+                                rel_path = os.path.relpath(item_path, project_dir)
+                                self.append_log(f"已自动加载程序图标: {rel_path}")
+                                return
 
         except Exception as e:
             print(f"自动加载图标失败: {e}")
@@ -845,15 +1547,41 @@ class MainWindow(QMainWindow):
         if not script_path or not os.path.isfile(script_path):
             return
 
+        # 规范化脚本路径，统一使用系统默认的路径分隔符
+        script_path = os.path.normpath(script_path)
+
+        # 检查脚本路径是否实际改变
+        if script_path == self._previous_script_path:
+            return
+
         script_dir = os.path.dirname(script_path)
+        script_dir = os.path.normpath(script_dir)  # 规范化目录路径
 
-        # 如果未设置项目目录，则设置
-        if not self.project_dir_edit.text().strip():
+        # 获取之前脚本的目录
+        previous_script_dir = None
+        if self._previous_script_path and os.path.isfile(self._previous_script_path):
+            previous_script_dir = os.path.dirname(self._previous_script_path)
+
+        # 更新上一次的脚本路径
+        self._previous_script_path = script_path
+
+        # 获取当前项目目录和输出目录的值
+        current_project_dir = self.project_dir_edit.text().strip()
+        current_output_dir = self.output_dir_edit.text().strip()
+
+        # 如果项目目录为空，或者项目目录是之前脚本的目录，则更新为新脚本的目录
+        if not current_project_dir or current_project_dir == previous_script_dir:
+            # 阻止信号避免触发 on_project_dir_changed
+            self.project_dir_edit.blockSignals(True)
             self.project_dir_edit.setText(script_dir)
+            self.project_dir_edit.blockSignals(False)
+            # 手动更新 _previous_project_dir
+            self._previous_project_dir = script_dir
 
-        # 如果未设置输出目录，则设置
-        if not self.output_dir_edit.text().strip():
-            self.output_dir_edit.setText(os.path.join(script_dir, "build"))
+        # 如果输出目录为空，或者输出目录是之前脚本目录的build子目录，则更新为新脚本目录的build子目录
+        if not current_output_dir or (previous_script_dir and current_output_dir == os.path.join(previous_script_dir, "build")):
+            output_path = os.path.normpath(os.path.join(script_dir, "build"))
+            self.output_dir_edit.setText(output_path)
 
         # 从脚本名称设置程序名称
         if not self.program_name_edit.text().strip() or self._is_auto_filled_name():
@@ -888,7 +1616,6 @@ class MainWindow(QMainWindow):
 
         # Show/hide Nuitka-specific options
         self.gcc_widget.setVisible(is_nuitka)
-        self.lto_check.setVisible(is_nuitka)
 
         # Load GCC config for Nuitka
         if is_nuitka and not self.gcc_config_loaded and not self.gcc_config_loading:
@@ -935,7 +1662,7 @@ class MainWindow(QMainWindow):
         if exclude_modules_text:
             exclude_modules = [m.strip() for m in exclude_modules_text.split(',') if m.strip()]
 
-        return {
+        config = {
             "script_path": script_path,
             "project_dir": project_dir,
             "output_dir": self.output_dir_edit.text().strip() or None,
@@ -948,10 +1675,16 @@ class MainWindow(QMainWindow):
             "console": self.console_check.isChecked(),
             "clean": self.clean_check.isChecked(),
             "upx": self.upx_check.isChecked(),
-            "lto": self.lto_check.isChecked(),
-            "python_opt": self.python_opt_check.isChecked(),
+            "lto": True,  # 默认启用LTO链接优化
+            "python_opt": True,  # 默认启用Python优化
             "exclude_modules": exclude_modules,
         }
+
+        # 如果勾选了版权信息，添加到配置中
+        if self.version_info_check.isChecked():
+            config["version_info"] = self.version_info
+
+        return config
 
     # =========================================================================
     # Button State Management

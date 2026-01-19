@@ -1,12 +1,7 @@
 """
 工作线程模块
 
-本模块为后台任务提供基于QThread的工作线程，
-遵循PyQt6最佳实践：
-1. 使用QThread的moveToThread模式或QRunnable与QThreadPool
-2. 通过信号/槽进行线程安全通信
-3. 支持干净的取消操作
-4. 全面使用类型提示
+基于QRunnable/QThread的后台任务工作线程，支持取消操作和线程安全通信。
 """
 
 import subprocess
@@ -17,10 +12,15 @@ from typing import Any, Callable, Dict, Optional
 from PyQt6.QtCore import QMutex, QObject, QRunnable, QThread, pyqtSignal, pyqtSlot
 
 # Windows子进程隐藏控制台窗口标志
-if sys.platform == "win32":
-    CREATE_NO_WINDOW = 0x08000000
-else:
-    CREATE_NO_WINDOW = 0
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+
+def _handle_worker_exception(signals: "WorkerSignals", prefix: str, e: Exception) -> None:
+    """统一处理工作线程异常"""
+    error_msg = str(e)
+    tb = traceback.format_exc()
+    signals.error.emit(error_msg, tb)
+    signals.finished.emit(False, f"{prefix}: {error_msg}")
 
 
 class WorkerSignals(QObject):
@@ -134,16 +134,12 @@ class PackagingWorker(BaseWorker):
             if self.is_cancelled():
                 self.signals.finished.emit(False, "打包已取消")
             else:
-                # 在结果信号中存储exe_path
                 if success and exe_path:
                     self.signals.result.emit(exe_path)
                 self.signals.finished.emit(success, message)
 
         except Exception as e:
-            error_msg = str(e)
-            tb = traceback.format_exc()
-            self.signals.error.emit(error_msg, tb)
-            self.signals.finished.emit(False, f"打包出错: {error_msg}")
+            _handle_worker_exception(self.signals, "打包出错", e)
 
     def terminate_process(self) -> None:
         """终止正在运行的子进程（如果有）"""
@@ -207,10 +203,7 @@ class DependencyAnalysisWorker(BaseWorker):
             self.signals.finished.emit(True, "依赖分析完成")
 
         except Exception as e:
-            error_msg = str(e)
-            tb = traceback.format_exc()
-            self.signals.error.emit(error_msg, tb)
-            self.signals.finished.emit(False, f"分析出错: {error_msg}")
+            _handle_worker_exception(self.signals, "分析出错", e)
 
 
 class DownloadWorker(BaseWorker):
@@ -263,27 +256,16 @@ class DownloadWorker(BaseWorker):
         except TypeError:
             # 函数不支持我们的回调，尝试不使用它们
             try:
-                # 移除我们的自定义kwargs
                 self.kwargs.pop("cancel_check", None)
                 self.kwargs.pop("progress_callback", None)
-
                 result = self.download_func(*self.args, **self.kwargs)
                 self.signals.result.emit(result)
-                self.signals.finished.emit(
-                    bool(result),
-                    "下载完成" if result else "下载失败"
-                )
+                self.signals.finished.emit(bool(result), "下载完成" if result else "下载失败")
             except Exception as e:
-                error_msg = str(e)
-                tb = traceback.format_exc()
-                self.signals.error.emit(error_msg, tb)
-                self.signals.finished.emit(False, f"下载出错: {error_msg}")
+                _handle_worker_exception(self.signals, "下载出错", e)
 
         except Exception as e:
-            error_msg = str(e)
-            tb = traceback.format_exc()
-            self.signals.error.emit(error_msg, tb)
-            self.signals.finished.emit(False, f"下载出错: {error_msg}")
+            _handle_worker_exception(self.signals, "下载出错", e)
 
 
 class GenericWorker(BaseWorker):
@@ -319,10 +301,7 @@ class GenericWorker(BaseWorker):
                 self.signals.finished.emit(True, "任务完成")
 
         except Exception as e:
-            error_msg = str(e)
-            tb = traceback.format_exc()
-            self.signals.error.emit(error_msg, tb)
-            self.signals.finished.emit(False, f"任务出错: {error_msg}")
+            _handle_worker_exception(self.signals, "任务出错", e)
 
 
 class LongRunningWorker(QThread):
@@ -414,19 +393,16 @@ class LongRunningWorker(QThread):
             try:
                 self.kwargs.pop("cancel_check", None)
                 self.kwargs.pop("pause_check", None)
-
                 result = self.func(*self.args, **self.kwargs)
                 self.result_signal.emit(result)
                 self.finished_signal.emit(True, "任务完成")
-
             except Exception as e:
-                error_msg = str(e)
-                tb = traceback.format_exc()
-                self.error_signal.emit(error_msg, tb)
-                self.finished_signal.emit(False, f"任务出错: {error_msg}")
+                self._emit_error("任务出错", e)
 
         except Exception as e:
-            error_msg = str(e)
-            tb = traceback.format_exc()
-            self.error_signal.emit(error_msg, tb)
-            self.finished_signal.emit(False, f"任务出错: {error_msg}")
+            self._emit_error("任务出错", e)
+
+    def _emit_error(self, prefix: str, e: Exception) -> None:
+        """发出错误信号"""
+        self.error_signal.emit(str(e), traceback.format_exc())
+        self.finished_signal.emit(False, f"{prefix}: {e}")

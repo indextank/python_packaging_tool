@@ -233,3 +233,5 @@ tools/
 config/gcc_config.json
 .zed/
 需求文档.md
+tests/
+code-simplifier.md

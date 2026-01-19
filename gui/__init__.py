@@ -61,4 +61,5 @@ __all__ = [
     "GenericWorker",
 ]
 
-__version__ = "1.3.0"
+# 从统一的版本模块导入版本号
+from version import __version__
