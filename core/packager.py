@@ -1,6 +1,7 @@
 import ast
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,26 +61,242 @@ class Packager:
         self._current_mirror_index = 0  # 当前使用的镜像源索引
         self._is_domestic_network: Optional[bool] = None  # 缓存网络环境检测结果
         self._pip_mirrors: Optional[List[Tuple[str, Optional[str]]]] = None  # 当前使用的镜像源列表
+        self._pending_version_info: Optional[Dict] = None  # 待后处理的版本信息（用于 Nuitka 2.8 + 中文）
+
+    def _normalize_windows_version(self, version_str: str) -> str:
+        """
+        规范化 Windows 版本号，确保符合格式要求。
+
+        Windows 版本号必须是最多 4 个整数，每个整数不超过 65535。
+        例如：1.0.0, 1.2.3.4
+
+        处理规则：
+        - 日期格式 YYYYMMDD：转换为 MM.DD.0.0
+        - 普通版本号：保留前4段
+        - 非数字部分：忽略
+        """
+        if not version_str:
+            return "1.0.0.0"
+
+        # 移除前缀 v 或 V
+        version_str = version_str.lstrip("vV")
+
+        # 尝试解析为日期格式 YYYYMMDD
+        if len(version_str) == 8 and version_str.isdigit():
+            month = version_str[4:6]
+            day = version_str[6:8]
+            return f"{int(month)}.{int(day)}.0.0"
+
+        # 分割版本号
+        parts = version_str.replace("-", ".").replace("_", ".").split(".")
+        result = []
+        for part in parts[:4]:
+            # 只保留数字部分
+            digits = "".join(c for c in part if c.isdigit())
+            if digits:
+                num = int(digits)
+                # 限制在 65535 以内
+                result.append(str(min(num, 65535)))
+            else:
+                result.append("0")
+
+        # 补足4段
+        while len(result) < 4:
+            result.append("0")
+
+        return ".".join(result[:4])
+
+    def _sanitize_for_cmdline(self, text: str) -> str:
+        """
+        将文本转换为命令行安全的 ASCII 格式。
+
+        解决 Nuitka 2.8.x 不支持 --windows-force-rc-file 时，
+        中文字符导致 MSVC 编译器报错的问题（C4819/C2001 错误）。
+        """
+        if not text:
+            return text
+
+        try:
+            text.encode('ascii')
+            return text
+        except UnicodeEncodeError:
+            # 移除非 ASCII 字符，只保留 ASCII 部分
+            ascii_chars = []
+            for char in text:
+                if ord(char) < 128:
+                    ascii_chars.append(char)
+                elif ascii_chars and ascii_chars[-1] != ' ':
+                    ascii_chars.append(' ')
+
+            result = ''.join(ascii_chars).strip()
+            return result if result else "Application"
+
+    def _convert_version_to_windows_format(self, version_str: str) -> str:
+        """
+        将版本号转换为 Windows 格式（4 个整数：major.minor.build.revision）
+
+        Windows 版本号要求：
+        - 必须是 4 个整数
+        - 每个整数不能超过 65535
+
+        Args:
+            version_str: 原始版本号字符串，如 "1.0.20260123" 或 "1.0.0"
+
+        Returns:
+            Windows 格式的版本号，如 "1.0.2026.123" 或 "1.0.0.0"
+        """
+        if not version_str:
+            return "1.0.0.0"
+
+        # 移除前缀 v 或 V
+        version_str = version_str.lstrip("vV")
+
+        # 移除所有非数字和非点号的字符
+        cleaned = re.sub(r'[^\d.]', '', version_str)
+
+        # 按点号分割
+        parts = cleaned.split('.')
+
+        # 提取数字部分并处理超过 65535 的情况
+        numeric_parts = []
+        for part in parts:
+            if part:
+                try:
+                    num = int(part)
+                    # Windows 版本号每个部分不能超过 65535
+                    if num > 65535:
+                        # 如果数字超过 65535，尝试拆分
+                        # 例如：20260123 -> 2026 和 123（年份和日期）
+                        if len(part) == 8 and part.isdigit():
+                            # 可能是日期格式 YYYYMMDD
+                            year = int(part[:4])
+                            month = int(part[4:6])
+                            day = int(part[6:8])
+                            # 限制在有效范围内
+                            numeric_parts.append(str(min(year, 65535)))
+                            numeric_parts.append(str(min(month, 65535)))
+                            numeric_parts.append(str(min(day, 65535)))
+                        else:
+                            # 其他情况：取前 5 位和后 5 位（如果可能）
+                            num_str = str(num)
+                            if len(num_str) > 5:
+                                # 拆分：前部分和后部分
+                                mid = len(num_str) // 2
+                                part1 = int(num_str[:mid])
+                                part2 = int(num_str[mid:])
+                                numeric_parts.append(str(min(part1, 65535)))
+                                numeric_parts.append(str(min(part2, 65535)))
+                            else:
+                                # 如果无法合理拆分，直接限制为 65535
+                                numeric_parts.append("65535")
+                    else:
+                        numeric_parts.append(str(num))
+                except ValueError:
+                    continue
+
+        # 如果没有任何数字部分，返回默认版本
+        if not numeric_parts:
+            return "1.0.0.0"
+
+        # 确保至少有 4 个部分，不足的用 0 补齐
+        while len(numeric_parts) < 4:
+            numeric_parts.append("0")
+
+        # 如果超过 4 个部分，只取前 4 个
+        if len(numeric_parts) > 4:
+            numeric_parts = numeric_parts[:4]
+
+        return ".".join(numeric_parts)
+
+    def _escape_for_windows_version_info(self, text: str) -> str:
+        r"""
+        转义 Windows 版本信息中的特殊字符，确保能正确显示。
+
+        Windows 版本信息中的特殊字符处理：
+        1. 反斜杠 \ 需要转义为 \\
+        2. 引号 " 需要转义为 \"
+        3. 其他特殊字符（如 /、空格）不需要转义，但需要用引号包裹整个字符串
+
+        注意：对于 Nuitka 命令行参数，当使用 subprocess 的列表形式时，
+        subprocess 会自动处理引号和转义。但为了确保特殊字符（如 /）不被截断，
+        我们需要确保值被正确引用。
+
+        Args:
+            text: 需要转义的文本
+
+        Returns:
+            转义后的文本（保持原样，因为 subprocess 会自动处理）
+        """
+        if not text:
+            return text
+
+        # 对于 subprocess 的列表形式，不需要手动转义
+        # subprocess 会自动处理引号和特殊字符
+        # 但我们需要确保文本本身是正确的（不包含会导致问题的字符序列）
+
+        # 注意：在 Windows 版本信息中，某些字符可能需要特殊处理
+        # 但 Nuitka 的命令行参数处理应该能正确处理这些字符
+        # 我们只需要确保文本原样传递即可
+
+        return text
 
     def _add_version_info_cmdline(self, cmd: List[str], product_name: str, company_name: str,
-                                   file_description: str, copyright_text: str, version_str: str) -> None:
-        """通过命令行参数添加 Windows 版本信息"""
+                                   file_description: str, copyright_text: str, version_str: str,
+                                   sanitize_non_ascii: bool = False) -> None:
+        """
+        通过命令行参数添加 Windows 版本信息
+
+        Args:
+            sanitize_non_ascii: 是否将非 ASCII 字符转换为安全格式（用于 Nuitka 2.8.x）
+        """
+        if sanitize_non_ascii:
+            product_name = self._sanitize_for_cmdline(product_name)
+            company_name = self._sanitize_for_cmdline(company_name)
+            file_description = self._sanitize_for_cmdline(file_description)
+            copyright_text = self._sanitize_for_cmdline(copyright_text)
+        # 对于 subprocess 的列表形式，不需要手动转义
+        # subprocess 会自动处理引号和特殊字符
+        # 但为了确保特殊字符（如 /、空格）在 Windows 版本信息中能正确显示，
+        # 我们需要确保值被正确传递
+
+        # 注意：Nuitka 在解析 --key=value 格式时，可能会将某些字符（如 /）当作特殊字符
+        # 为了确保包含特殊字符的值被正确解析，我们直接传递值，让 subprocess 处理
+        # subprocess 的列表形式会自动处理引号和转义，确保值被正确传递
+
+        # 对于包含特殊字符（如 /、空格）的值，需要确保被正确传递
+        # 使用 subprocess 的列表形式时，subprocess 会自动处理引号和转义
+        # 但 Nuitka 在解析 --key=value 格式时，可能会将某些字符（如 /）当作特殊字符
+        # 为了确保特殊字符不被截断，我们将参数拆分为键和值（如果值包含特殊字符）
+
+        def add_version_arg(key: str, value: str) -> None:
+            """添加版本信息参数，确保特殊字符被正确传递"""
+            if not value:
+                return
+
+            # 使用 subprocess 列表模式时，不需要手动添加引号
+            # subprocess 会自动处理参数中的特殊字符（空格、斜杠等）
+            # 直接使用 --key=value 格式，让 subprocess 处理转义
+            # 这样最终的 exe 文件属性中就不会出现多余的双引号
+            cmd.append(f"{key}={value}")
+
         if product_name:
-            cmd.append(f"--windows-product-name={product_name}")
+            add_version_arg("--windows-product-name", product_name)
             self.log(f"  ✓ 产品名称: {product_name}")
         if company_name:
-            cmd.append(f"--windows-company-name={company_name}")
+            add_version_arg("--windows-company-name", company_name)
             self.log(f"  ✓ 公司名称: {company_name}")
         if file_description:
-            cmd.append(f"--windows-file-description={file_description}")
+            add_version_arg("--windows-file-description", file_description)
             self.log(f"  ✓ 文件描述: {file_description}")
         if copyright_text:
-            cmd.append(f"--copyright={copyright_text}")
+            add_version_arg("--copyright", copyright_text)
             self.log(f"  ✓ 版权信息: {copyright_text}")
         if version_str:
-            cmd.append(f"--windows-product-version={version_str}")
-            cmd.append(f"--windows-file-version={version_str}")
-            self.log(f"  ✓ 版本号: {version_str}")
+            # 转换为 Windows 格式（4 个整数）
+            windows_version = self._convert_version_to_windows_format(version_str)
+            cmd.append(f"--windows-product-version={windows_version}")
+            cmd.append(f"--windows-file-version={windows_version}")
+            self.log(f"  ✓ 版本号: {version_str} (Windows格式: {windows_version})")
 
     def _create_version_resource_file(self, output_dir: str, script_name: str,
                                        product_name: str, company_name: str,
@@ -110,11 +327,28 @@ class Packager:
             version_tuple = ",".join(version_parts)
             version_dot = ".".join(version_parts)
 
-            # 转义特殊字符
+            # 转义特殊字符（用于 .rc 文件）
             def escape_rc_string(s: str) -> str:
+                r"""
+                转义 Windows 资源文件（.rc）中的特殊字符
+
+                在 .rc 文件中：
+                1. 反斜杠 \ 需要转义为 \\
+                2. 引号 " 需要转义为 \"
+                3. 其他特殊字符（如 /、空格、中文字符）不需要转义
+                4. 注意：在 Windows 版本信息中，"/" 字符是合法的，不需要转义
+                  但需要确保值被引号正确包裹
+                5. 值会被引号包裹（VALUE "Key", "value"），所以特殊字符可以正常显示
+                """
                 if not s:
                     return ""
-                return s.replace("\\", "\\\\").replace('"', '\\"')
+                # 转义反斜杠（必须最先处理）
+                s = s.replace("\\", "\\\\")
+                # 转义引号（在引号内的字符串中，引号需要转义）
+                s = s.replace('"', '\\"')
+                # 其他字符（如 /、空格、中文字符）不需要转义
+                # 值会被引号包裹，所以这些字符可以正常显示
+                return s
 
             product_name_escaped = escape_rc_string(product_name)
             company_name_escaped = escape_rc_string(company_name)
@@ -269,6 +503,260 @@ END
                 return False, "检测到 Visual Studio 目录，但未找到 rc.exe，可能需要安装 C++ 桌面开发工具"
 
         return False, "未检测到 Windows SDK 或 Visual Studio，中文版本信息可能无法正常显示"
+
+    def _post_process_add_version_info(self, exe_path: str) -> bool:
+        """
+        后处理：将中文版本信息嵌入到已打包的 exe 中
+
+        使用 rcedit 或 Resource Hacker 将版本信息嵌入到 exe 中。
+
+        Args:
+            exe_path: exe 文件路径
+
+        Returns:
+            是否成功
+        """
+        if not hasattr(self, '_pending_version_info') or not self._pending_version_info:
+            return False
+
+        info = self._pending_version_info
+        product_name = info.get('product_name', '')
+        company_name = info.get('company_name', '')
+        file_description = info.get('file_description', '')
+        copyright_text = info.get('copyright_text', '')
+        version_str = info.get('version_str', '')
+
+        try:
+            # 尝试找到或下载 rcedit
+            rcedit_exe = self._find_or_download_rcedit()
+
+            if rcedit_exe and os.path.exists(rcedit_exe):
+                self.log(f"  使用 rcedit: {rcedit_exe}")
+
+                # 转换版本号为 Windows 格式
+                windows_version = self._convert_version_to_windows_format(version_str)
+
+                # rcedit 命令行用法
+                success = True
+
+                # 设置产品名称
+                if product_name:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-version-string", "ProductName", product_name],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置产品名称失败: {result.stderr}")
+                        success = False
+
+                # 设置文件描述
+                if file_description:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-version-string", "FileDescription", file_description],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置文件描述失败: {result.stderr}")
+                        success = False
+
+                # 设置版权信息
+                if copyright_text:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-version-string", "LegalCopyright", copyright_text],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置版权信息失败: {result.stderr}")
+                        success = False
+
+                # 设置公司名称
+                if company_name:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-version-string", "CompanyName", company_name],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置公司名称失败: {result.stderr}")
+                        success = False
+
+                # 设置产品版本
+                if windows_version:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-product-version", windows_version],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置产品版本失败: {result.stderr}")
+                        success = False
+
+                # 设置文件版本
+                if windows_version:
+                    result = subprocess.run(
+                        [rcedit_exe, exe_path, "--set-file-version", windows_version],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if result.returncode != 0:
+                        self.log(f"  设置文件版本失败: {result.stderr}")
+                        success = False
+
+                if success:
+                    self.log("  ✓ 版本信息已通过 rcedit 嵌入")
+                    return True
+
+            # 尝试使用 Resource Hacker
+            rh_paths = [
+                r"C:\Program Files (x86)\Resource Hacker\ResourceHacker.exe",
+                r"C:\Program Files\Resource Hacker\ResourceHacker.exe",
+            ]
+
+            rh_exe = None
+            for path in rh_paths:
+                if os.path.exists(path):
+                    rh_exe = path
+                    break
+
+            if rh_exe:
+                self.log(f"  使用 Resource Hacker: {rh_exe}")
+
+                # 创建资源文件
+                res_file = self._create_version_resource_file(
+                    output_dir=info['output_dir'],
+                    script_name=info['script_name'],
+                    product_name=product_name,
+                    company_name=company_name,
+                    file_description=file_description,
+                    copyright_text=copyright_text,
+                    version_str=version_str,
+                    icon_path=None
+                )
+
+                if res_file and os.path.exists(res_file):
+                    cmd = [
+                        rh_exe,
+                        "-open", exe_path,
+                        "-save", exe_path,
+                        "-action", "addoverwrite",
+                        "-res", res_file,
+                        "-mask", "VERSIONINFO,,"
+                    ]
+
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                        timeout=60,
+                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+
+                    if result.returncode == 0:
+                        self.log("  ✓ 版本信息已通过 Resource Hacker 嵌入")
+                        return True
+                    else:
+                        self.log(f"  Resource Hacker 执行失败: {result.stderr}")
+
+            # 如果没有可用的工具，返回失败
+            self.log("  未找到可用的资源编辑工具")
+            self.log("  正在尝试自动下载 rcedit...")
+
+            # 尝试下载 rcedit
+            rcedit_exe = self._download_rcedit()
+            if rcedit_exe:
+                # 递归调用自己
+                return self._post_process_add_version_info(exe_path)
+
+            self.log("  ⚠️  无法添加中文版本信息")
+            self.log("  提示：手动安装 Resource Hacker 可以支持中文版本信息")
+            self.log("  下载地址：http://www.angusj.com/resourcehacker/")
+
+            return False
+
+        except Exception as e:
+            self.log(f"  后处理出错: {str(e)}")
+            return False
+
+    def _find_or_download_rcedit(self) -> Optional[str]:
+        """
+        查找或下载 rcedit 工具
+
+        Returns:
+            rcedit.exe 的路径，如果找不到返回 None
+        """
+        # 检查常见位置
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools", "rcedit.exe"),
+            os.path.join(os.path.dirname(sys.executable), "rcedit.exe"),
+            os.path.join(os.path.dirname(sys.executable), "Scripts", "rcedit.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "rcedit", "rcedit.exe"),
+        ]
+
+        for path in possible_paths:
+            abs_path = os.path.abspath(path)
+            if os.path.exists(abs_path):
+                return abs_path
+
+        return None
+
+    def _download_rcedit(self) -> Optional[str]:
+        """
+        下载 rcedit 工具
+
+        Returns:
+            下载后的 rcedit.exe 路径，失败返回 None
+        """
+        try:
+            try:
+                import requests
+            except ImportError:
+                requests = None
+
+            import urllib.error
+            import urllib.request
+
+            # rcedit 下载地址（GitHub Release）
+            # 使用国内镜像加速
+            urls = [
+                "https://ghproxy.com/https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe",
+                "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe",
+            ]
+
+            # 下载目录
+            tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools")
+            os.makedirs(tools_dir, exist_ok=True)
+
+            rcedit_path = os.path.join(tools_dir, "rcedit.exe")
+
+            for url in urls:
+                try:
+                    self.log(f"  正在下载 rcedit: {url}")
+                    if requests:
+                        response = requests.get(url, timeout=30)
+                        if response.status_code == 200:
+                            with open(rcedit_path, "wb") as f:
+                                f.write(response.content)
+                            self.log(f"  ✓ rcedit 下载成功: {rcedit_path}")
+                            return rcedit_path
+                    else:
+                        req = urllib.request.Request(url, headers={"User-Agent": "Python-Packaging-Tool"})
+                        with urllib.request.urlopen(req, timeout=30) as resp:
+                            if resp.status == 200:
+                                with open(rcedit_path, "wb") as f:
+                                    f.write(resp.read())
+                                self.log(f"  ✓ rcedit 下载成功: {rcedit_path}")
+                                return rcedit_path
+                except Exception as e:
+                    self.log(f"  下载失败: {str(e)}")
+                    continue
+
+            return None
+
+        except Exception as e:
+            self.log(f"  下载 rcedit 时出错: {str(e)}")
+            return None
 
     def _get_windows_sdk_include_dirs(self) -> List[str]:
         """
@@ -1533,25 +2021,22 @@ VSVersionInfo(
             self.log(f"✓ {tool} 已安装")
             # 验证能否导入
             self.log(f"验证 {tool} 可用性...")
-            verify_result = subprocess.run(
-                [python_path, "-c", f"import {tool}; print({tool}.__version__)"],
-                capture_output=True,
-                text=True,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            if verify_result.returncode == 0:
-                version = verify_result.stdout.strip()
-                self.log(f"✓ {tool} 版本: {version}")
+            # Nuitka 的版本号获取方式比较特殊，优先尝试命令行获取
+            if tool.lower() == "nuitka":
+                verify_result = subprocess.run(
+                    [python_path, "-m", "nuitka", "--version"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=CREATE_NO_WINDOW,
+                )
+                if verify_result.returncode == 0:
+                    # 提取第一行作为版本信息
+                    version = verify_result.stdout.strip().split('\n')[0]
+                    self.log(f"✓ {tool} 可用: {version}")
+                else:
+                    self.log(f"⚠️ 警告: {tool} 已安装但运行失败")
+                    self.log(f"错误信息: {verify_result.stderr}")
             else:
-                self.log(f"⚠️ 警告: {tool} 已安装但无法导入")
-                self.log(f"错误信息: {verify_result.stderr}")
-        else:
-            # 未安装，使用多镜像源安装
-            self.log(f"安装 {tool}...")
-            success = self._pip_install_with_mirrors(python_path, [tool])
-            if success:
-                self.log(f"✓ {tool} 安装成功")
-                # 再次验证
                 verify_result = subprocess.run(
                     [python_path, "-c", f"import {tool}; print({tool}.__version__)"],
                     capture_output=True,
@@ -1560,9 +2045,41 @@ VSVersionInfo(
                 )
                 if verify_result.returncode == 0:
                     version = verify_result.stdout.strip()
-                    self.log(f"✓ {tool} 验证成功，版本: {version}")
+                    self.log(f"✓ {tool} 版本: {version}")
                 else:
-                    self.log(f"⚠️ 警告: {tool} 安装后无法导入")
+                    self.log(f"⚠️ 警告: {tool} 已安装但无法导入")
+                    self.log(f"错误信息: {verify_result.stderr}")
+        else:
+            # 未安装，使用多镜像源安装
+            self.log(f"安装 {tool}...")
+            success = self._pip_install_with_mirrors(python_path, [tool])
+            if success:
+                self.log(f"✓ {tool} 安装成功")
+                # 再次验证
+                if tool.lower() == "nuitka":
+                    verify_result = subprocess.run(
+                        [python_path, "-m", "nuitka", "--version"],
+                        capture_output=True,
+                        text=True,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                    if verify_result.returncode == 0:
+                        version = verify_result.stdout.strip().split('\n')[0]
+                        self.log(f"✓ {tool} 验证成功: {version}")
+                    else:
+                        self.log(f"⚠️ 警告: {tool} 安装后运行失败")
+                else:
+                    verify_result = subprocess.run(
+                        [python_path, "-c", f"import {tool}; print({tool}.__version__)"],
+                        capture_output=True,
+                        text=True,
+                        creationflags=CREATE_NO_WINDOW,
+                    )
+                    if verify_result.returncode == 0:
+                        version = verify_result.stdout.strip()
+                        self.log(f"✓ {tool} 验证成功，版本: {version}")
+                    else:
+                        self.log(f"⚠️ 警告: {tool} 安装后无法导入")
             else:
                 self.log(f"警告: {tool} 安装失败，尝试使用依赖管理器...")
                 try:
@@ -3132,34 +3649,182 @@ _setup_icon()
         # 检测模块是真正的包（目录）还是单文件模块
         def is_real_package(module_name: str) -> bool:
             """
+            强化版包检测方法，支持所有类型的 Python 项目/脚本。
+
             检测一个模块是否是真正的包（有 __path__ 属性）。
             单文件模块（如 img2pdf.py）不是包，不能使用 --include-package。
+
+            支持的情况：
+            1. 标准包（有 __init__.py 的目录）
+            2. 命名空间包（PEP 420，没有 __init__.py）
+            3. 单文件模块（.py 文件）
+            4. C 扩展模块（.pyd/.so）
+            5. 内建模块
+            6. 标准库模块
+            7. 包名和导入名不一致的情况（如 dnspython -> dns）
+            8. 导入失败的情况（保守处理，假设是包）
+
+            Args:
+                module_name: 模块名（可能是包名或导入名）
+
+            Returns:
+                True 如果是包，False 如果是单文件模块
             """
+            # 扩展的包名到导入名映射（处理安装名和导入名不一致的情况）
+            package_import_map = {
+                'dnspython': 'dns',           # dnspython 包导入时使用 dns
+                'pillow': 'PIL',              # Pillow 包导入时使用 PIL
+                'beautifulsoup4': 'bs4',      # beautifulsoup4 包导入时使用 bs4
+                'pyyaml': 'yaml',             # PyYAML 包导入时使用 yaml
+                'python-dateutil': 'dateutil', # python-dateutil 包导入时使用 dateutil
+                'opencv-python': 'cv2',       # opencv-python 包导入时使用 cv2
+                'opencv-contrib-python': 'cv2', # opencv-contrib-python 包导入时使用 cv2
+                'pymysql': 'pymysql',         # 保持原样
+                'mysql-connector-python': 'mysql.connector', # mysql-connector-python 包导入时使用 mysql.connector
+                'requests': 'requests',       # requests 是一个包
+                'urllib3': 'urllib3',         # urllib3 是一个包
+                'certifi': 'certifi',         # certifi 是一个包
+                'charset-normalizer': 'charset_normalizer', # charset-normalizer 包
+                'idna': 'idna',               # idna 是一个包
+            }
+
+            # 已知的单文件模块（明确不是包）
+            # 注意：requests 和 urllib3 是包，不是单文件模块
+            known_single_file_modules = {
+                'img2pdf', 'pyperclip', 'keyboard', 'mouse', 'pynput',
+                'colorama', 'tqdm', 'click',
+            }
+
+            # 已知的标准库包（明确是包）
+            known_stdlib_packages = {
+                'email', 'http', 'urllib', 'xml', 'json', 'logging',
+                'multiprocessing', 'concurrent', 'asyncio', 'collections',
+                'distutils', 'unittest', 'doctest', 'pdb', 'pydoc',
+            }
+
+            # 快速检查：已知的单文件模块
+            if module_name.lower() in known_single_file_modules:
+                return False
+
+            # 快速检查：已知的标准库包
+            if module_name.lower() in known_stdlib_packages:
+                return True
+
+            # 获取实际导入名
+            import_name = package_import_map.get(module_name.lower(), module_name)
+
+            # 增强的检测代码，支持多种检测方式
             check_code = f'''
 import sys
 import importlib
-try:
-    mod = importlib.import_module("{module_name}")
-    # 真正的包有 __path__ 属性
-    if hasattr(mod, "__path__"):
-        print("package")
-    else:
-        print("module")
-except:
-    print("error")
+import os
+from pathlib import Path
+
+def detect_module_type(module_name):
+    """检测模块类型：package, module, builtin, error"""
+    try:
+        # 尝试导入模块
+        mod = importlib.import_module(module_name)
+
+        # 检查是否是内建模块
+        if module_name in sys.builtin_module_names:
+            # 内建模块通常是单文件模块
+            return "module"
+
+        # 检查是否有 __path__ 属性（包的特征）
+        if hasattr(mod, "__path__"):
+            # 有 __path__ 属性，是包
+            # 进一步验证：检查 __path__ 是否指向目录
+            path = mod.__path__
+            if isinstance(path, (list, tuple)) and len(path) > 0:
+                first_path = path[0]
+                if os.path.exists(first_path) and os.path.isdir(first_path):
+                    return "package"
+            return "package"
+
+        # 检查是否有 __file__ 属性
+        if hasattr(mod, "__file__"):
+            file_path = mod.__file__
+            if file_path:
+                # 检查文件扩展名
+                if file_path.endswith(('.py', '.pyc', '.pyo')):
+                    # Python 源文件或字节码文件
+                    # 检查是否是 __init__.py（包的标志）
+                    if os.path.basename(file_path) in ('__init__.py', '__init__.pyc', '__init__.pyo'):
+                        return "package"
+                    # 检查父目录是否有 __init__.py（标准包）
+                    parent_dir = os.path.dirname(file_path)
+                    if os.path.exists(os.path.join(parent_dir, '__init__.py')):
+                        return "package"
+                    # 否则是单文件模块
+                    return "module"
+                elif file_path.endswith(('.pyd', '.so')):
+                    # C 扩展模块，通常是单文件模块
+                    return "module"
+
+        # 如果没有 __file__ 和 __path__，可能是命名空间包
+        # 命名空间包也有 __path__，但如果检测不到，可能是特殊情况
+        # 保守处理：假设是包
+        return "package"
+
+    except ImportError as e:
+        # 导入失败，尝试通过文件系统查找
+        # 检查 site-packages 目录
+        for path in sys.path:
+            if 'site-packages' in path or 'dist-packages' in path:
+                module_path = os.path.join(path, module_name)
+                if os.path.isdir(module_path):
+                    # 是目录，可能是包
+                    # 检查是否有 __init__.py（标准包）或没有（命名空间包）
+                    init_file = os.path.join(module_path, '__init__.py')
+                    if os.path.exists(init_file) or not os.listdir(module_path):
+                        return "package"
+                elif os.path.isfile(module_path + '.py'):
+                    # 是 .py 文件，是单文件模块
+                    return "module"
+                elif os.path.isfile(module_path + '.pyd') or os.path.isfile(module_path + '.so'):
+                    # 是 C 扩展模块，是单文件模块
+                    return "module"
+
+        # 无法确定，保守处理：假设是包
+        return "package"
+    except Exception as e:
+        # 其他错误，保守处理：假设是包
+        return "package"
+
+result = detect_module_type("{import_name}")
+print(result)
 '''
             try:
                 result = subprocess.run(
                     [python_path, "-c", check_code],
                     capture_output=True,
                     text=True,
-                    timeout=10,
+                    timeout=15,  # 增加超时时间
                     creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
                 )
                 output = result.stdout.strip()
-                return output == "package"
-            except:
-                # 默认假设是包，保守处理
+
+                if output == "package":
+                    return True
+                elif output == "module":
+                    return False
+                else:
+                    # 输出不是预期的值，可能是错误
+                    # 对于已知的包名映射，如果检测失败，默认假设是包
+                    if module_name.lower() in package_import_map:
+                        return True
+                    # 其他情况：保守处理，假设是包（避免遗漏）
+                    return True
+            except subprocess.TimeoutExpired:
+                # 超时：保守处理，假设是包
+                if module_name.lower() in package_import_map:
+                    return True
+                return True
+            except Exception:
+                # 其他异常：保守处理，假设是包
+                if module_name.lower() in package_import_map:
+                    return True
                 return True
 
         # 检测 wxPython（需要实际导入 wx 且包已安装）
@@ -3293,7 +3958,16 @@ except:
         else:
             self.log(f"\n使用自动分析的排除模块（共 {len(exclude_modules)} 个）")
 
-        # 处理GCC（如果提供）
+        # ========== 强制使用 GCC 编译器（必需） ==========
+        # Nuitka 打包时必须使用 GCC/MinGW 编译器，原因：
+        # 1. MSVC 编译器无法正确处理命令行传递的中文字符，会导致 C2001 编译错误
+        # 2. GCC/MinGW 可以正确处理 UTF-8 编码的中文版本信息
+        # 3. 即使不使用中文，GCC 也能更好地处理 Nuitka 生成的代码
+
+        self.log("\n" + "=" * 50)
+        self.log("配置 GCC 编译器（必需）...")
+        self.log("=" * 50)
+
         gcc_path = config.get("gcc_path", "")
 
         # 处理GCC路径 - 现在gcc_path应该是mingw64或mingw32目录
@@ -3306,24 +3980,68 @@ except:
                 gcc_path = mingw_path
                 self.log(f"找到已缓存的GCC工具链: {gcc_path}")
             else:
-                self.log("警告: 无法自动获取GCC工具链")
+                self.log("错误: 无法自动获取GCC工具链")
+                self.log("提示: 请在打包配置中指定 gcc_path，或使用工具自动下载 GCC")
+                return False, "缺少 GCC 编译器，Nuitka 打包必须使用 GCC"
 
-        if gcc_path and os.path.exists(gcc_path):
-            # 验证是否是有效的mingw目录
-            from utils.gcc_downloader import GCCDownloader
-            is_valid, msg = GCCDownloader.validate_mingw_directory(gcc_path)
-            if is_valid:
-                self.log(f"使用GCC工具链: {gcc_path}")
-                # 直接使用mingw目录，将bin目录添加到PATH
-                gcc_bin = os.path.join(gcc_path, "bin")
-                if os.path.exists(gcc_bin):
-                    os.environ["PATH"] = gcc_bin + os.pathsep + os.environ["PATH"]
-                    self.log(f"已将GCC添加到PATH: {gcc_bin}")
-                else:
-                    self.log(f"警告: GCC bin目录不存在: {gcc_bin}")
+        if not gcc_path or not os.path.exists(gcc_path):
+            return False, "未找到 GCC 编译器，Nuitka 打包必须使用 GCC/MinGW"
+
+        # 验证是否是有效的mingw目录
+        from utils.gcc_downloader import GCCDownloader
+        is_valid, msg = GCCDownloader.validate_mingw_directory(gcc_path)
+        if not is_valid:
+            self.log(f"错误: GCC目录验证失败: {msg}")
+            return False, f"GCC 工具链无效: {msg}"
+
+        self.log(f"✓ 使用GCC工具链: {gcc_path}")
+
+        # 将 GCC bin 目录添加到 PATH 的最前面，确保优先使用 GCC 而不是 MSVC
+        gcc_bin = os.path.join(gcc_path, "bin")
+        if not os.path.exists(gcc_bin):
+            self.log(f"错误: GCC bin目录不存在: {gcc_bin}")
+            return False, f"GCC bin 目录不存在: {gcc_bin}"
+
+        # 移除 PATH 中可能存在的 MSVC 相关路径，确保不会被 Nuitka/Scons 误用
+        original_path = os.environ.get("PATH", "")
+        path_parts = original_path.split(os.pathsep)
+
+        # 过滤掉可能包含 MSVC 的路径
+        filtered_paths = []
+        msvc_keywords = ['Microsoft Visual Studio', 'VC\\Tools', 'MSVC', '\\cl.exe']
+        for path_part in path_parts:
+            # 检查是否包含 MSVC 关键字
+            is_msvc_path = any(keyword.lower() in path_part.lower() for keyword in msvc_keywords)
+            if not is_msvc_path:
+                filtered_paths.append(path_part)
             else:
-                self.log(f"警告: GCC目录验证失败: {msg}")
-                self.log("将尝试使用系统GCC")
+                self.log(f"  移除 MSVC 路径: {path_part}")
+
+        # 将 GCC 放在最前面
+        new_path = gcc_bin + os.pathsep + os.pathsep.join(filtered_paths)
+        os.environ["PATH"] = new_path
+
+        self.log(f"✓ 已将 GCC 添加到 PATH 最前面: {gcc_bin}")
+        self.log("✓ 已移除 PATH 中的 MSVC 路径，确保使用 GCC 编译器")
+
+        # 验证 GCC 可用性
+        try:
+            gcc_exe = os.path.join(gcc_bin, "gcc.exe")
+            result = subprocess.run(
+                [gcc_exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if result.returncode == 0:
+                # 提取版本信息
+                version_line = result.stdout.split('\n')[0] if result.stdout else "未知版本"
+                self.log(f"✓ GCC 验证成功: {version_line}")
+            else:
+                self.log("警告: GCC 验证失败，但将继续尝试")
+        except Exception as e:
+            self.log(f"警告: 无法验证 GCC: {e}")
 
         # 构建Nuitka命令
         cmd = [python_path, "-m", "nuitka"]
@@ -3386,74 +4104,20 @@ except:
             any_chinese = any(has_non_ascii(v) for v in [product_name, company_name, file_description, copyright_text])
 
             if any_chinese:
-                # 使用 Windows 资源文件方式处理中文版本信息
-                # 检测Nuitka版本以决定是否支持 --windows-force-rc-file
-                nuitka_version = None
-                try:
-                    result = subprocess.run(
-                        [python_path, "-m", "nuitka", "--version"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                    )
-                    if result.returncode == 0:
-                        # 提取版本号，格式如 "2.8.9" 或 "2.9.0"
-                        import re
-                        version_match = re.search(r'(\d+)\.(\d+)\.(\d+)', result.stdout)
-                        if version_match:
-                            major = int(version_match.group(1))
-                            minor = int(version_match.group(2))
-                            nuitka_version = (major, minor)
-                            self.log(f"检测到 Nuitka 版本: {major}.{minor}")
-                except:
-                    pass
+                # 处理包含中文的版本信息
+                # 检查 Windows SDK 是否可用
+                # 由于已强制使用 GCC 编译器，可以直接传递中文版本信息
+                # GCC/MinGW 可以正确处理 UTF-8 编码，不会出现 MSVC 的 C2001 错误
+                self.log("✓ 使用 GCC 编译器，直接保留中文版本信息...")
+                self._add_version_info_cmdline(cmd, product_name, company_name,
+                                               file_description, copyright_text, version_str,
+                                               sanitize_non_ascii=False)
 
-                # Nuitka 2.9+ 支持 --windows-force-rc-file
-                supports_rc_file = nuitka_version and nuitka_version >= (2, 9)
-
-                if supports_rc_file:
-                    self.log("Nuitka 2.9+ 检测到，将尝试创建资源文件...")
-                    res_file = self._create_version_resource_file(
-                        output_dir=output_dir,
-                        script_name=script_name,
-                        product_name=product_name,
-                        company_name=company_name,
-                        file_description=file_description,
-                        copyright_text=copyright_text,
-                        version_str=version_str,
-                        icon_path=icon_path if icon_path and os.path.exists(icon_path) else None
-                    )
-
-                    if res_file and os.path.exists(res_file):
-                        # 使用 Nuitka 的 --windows-force-rc-file 参数
-                        cmd.append(f"--windows-force-rc-file={res_file}")
-                        use_rc_file = True  # 标记已使用资源文件
-                        self.log(f"  ✓ 已创建并编译资源文件: {res_file}")
-                        self.log(f"  ✓ 产品名称: {product_name}")
-                        self.log(f"  ✓ 公司名称: {company_name}")
-                        self.log(f"  ✓ 文件描述: {file_description}")
-                        self.log(f"  ✓ 版权信息: {copyright_text}")
-                        self.log(f"  ✓ 版本号: {version_str}")
-                        if icon_path:
-                            self.log(f"  ✓ 图标已包含在资源文件中")
-                        # 版本号只包含数字和点，可以安全传递
-                        if version_str:
-                            cmd.append(f"--product-version={version_str}")
-                            cmd.append(f"--file-version={version_str}")
-                    else:
-                        self.log("⚠️  资源文件创建失败，将使用命令行参数")
-                        # 回退到命令行参数（即使是中文，也尝试写入）
-                        self._add_version_info_cmdline(cmd, product_name, company_name,
-                                                       file_description, copyright_text, version_str)
-                else:
-                    # Nuitka 2.8.x 不支持 --windows-force-rc-file
-                    self.log("检测到 Nuitka 2.8.x，不支持 --windows-force-rc-file")
-                    self.log("⚠️  将使用命令行参数设置版本信息（中文可尝试写入）")
-                    self.log("⚠️  建议升级到 Nuitka 2.9+ 以获得完整中文支持")
-                    # 使用命令行参数写入元信息（尝试中文）
-                    self._add_version_info_cmdline(cmd, product_name, company_name,
-                                                   file_description, copyright_text, version_str)
+                self.log(f"  ✓ 产品名称: {product_name}")
+                self.log(f"  ✓ 公司名称: {company_name}")
+                self.log(f"  ✓ 文件描述: {file_description}")
+                self.log(f"  ✓ 版权信息: {copyright_text}")
+                self.log(f"  ✓ 版本号: {version_str}")
             else:
                 # 没有中文字符，直接使用命令行参数
                 self._add_version_info_cmdline(cmd, product_name, company_name,
@@ -3582,17 +4246,25 @@ except:
             if filtered_libs:
                 self.log(f"\n增强Analysis阶段: 对 {len(filtered_libs)} 个未配置的库使用完整收集")
                 for lib in sorted(filtered_libs):
+                    # 特殊处理：已知的包名和导入名不一致的情况
+                    package_import_map = {
+                        'dnspython': 'dns',  # dnspython 包导入时使用 dns
+                    }
+                    import_name = package_import_map.get(lib, lib)
+
                     # 先检测是否是真正的包（目录）还是单文件模块
                     if is_real_package(lib):
                         # 真正的包：使用 --include-package 收集整个包
-                        self.log(f"  收集 {lib} 的所有模块（包）...")
-                        cmd.append(f"--include-package={lib}")
+                        # 注意：使用实际的导入名，而不是包名
+                        self.log(f"  收集 {lib} 的所有模块（包，导入名: {import_name}）...")
+                        cmd.append(f"--include-package={import_name}")
                         # 同时包含包的数据文件
-                        cmd.append(f"--include-package-data={lib}")
+                        cmd.append(f"--include-package-data={import_name}")
                     else:
                         # 单文件模块：使用 --include-module
-                        self.log(f"  收集 {lib}（单文件模块）...")
-                        cmd.append(f"--include-module={lib}")
+                        # 注意：使用实际的导入名
+                        self.log(f"  收集 {lib}（单文件模块，导入名: {import_name}）...")
+                        cmd.append(f"--include-module={import_name}")
                 self.log(f"  ✓ 已为未配置的库启用完整收集模式")
 
         # 添加自动收集到的子模块
@@ -3921,34 +4593,134 @@ except:
             cmd.append("--include-package-data=certifi")
             self.log("已配置 Certifi 库支持（包含CA证书）")
 
-        # LTO链接时优化
-        if config.get("lto", True):
-            cmd.append("--lto=yes")
-            self.log("\n已启用LTO链接时优化，这将：")
-            self.log("  - 减小最终可执行文件体积")
-            self.log("  - 提升运行时性能")
-            self.log("  - 编译时间会略微增加")
+        # ========== 应用 Nuitka 高级选项（基于官方文档最佳实践）==========
+        nuitka_opts = config.get("nuitka_advanced_options", {})
 
-        # Python优化
-        if config.get("python_opt", True):
+        # 记录高级选项状态
+        if nuitka_opts:
+            self.log("\n" + "=" * 50)
+            self.log("应用 Nuitka 高级选项（基于官方最佳实践）")
+            self.log("=" * 50)
+
+        # LTO链接时优化
+        lto_enabled = nuitka_opts.get("lto", config.get("lto", True))
+        if lto_enabled:
+            cmd.append("--lto=yes")
+            self.log("✓ 已启用 LTO 链接时优化（减小体积、提升性能）")
+        else:
+            cmd.append("--lto=no")
+            self.log("✗ 已禁用 LTO 链接时优化")
+
+        # 低内存模式（Nuitka 官方推荐用于内存有限的系统）
+        if nuitka_opts.get("low_memory", False):
+            cmd.append("--low-memory")
+            self.log("✓ 已启用低内存模式（减少内存使用，增加编译时间）")
+
+        # 并行任务数
+        jobs = nuitka_opts.get("jobs")
+        if jobs is not None and jobs > 0:
+            cmd.append(f"--jobs={jobs}")
+            self.log(f"✓ 并行编译任务数: {jobs}")
+
+        # Python 标志优化（基于 Nuitka 官方文档）
+        python_opt = config.get("python_opt", True)
+        if python_opt or nuitka_opts.get("python_no_docstrings", True):
             cmd.append("--python-flag=no_docstrings")
+            self.log("✓ 已启用 --python-flag=no_docstrings（移除文档字符串）")
+
+        if python_opt or nuitka_opts.get("python_no_asserts", True):
             cmd.append("--python-flag=no_asserts")
-            self.log("\n已启用Python字节码优化，这将：")
-            self.log("  - 移除文档字符串（docstrings）")
-            self.log("  - 禁用断言语句（assert）")
+            self.log("✓ 已启用 --python-flag=no_asserts（禁用断言）")
+
+        if nuitka_opts.get("python_no_warnings", False):
+            cmd.append("--python-flag=no_warnings")
+            self.log("✓ 已启用 --python-flag=no_warnings（禁用运行时警告）")
+
+        if nuitka_opts.get("python_no_annotations", False):
+            cmd.append("--python-flag=no_annotations")
+            self.log("✓ 已启用 --python-flag=no_annotations（移除类型注解）")
+
+        # ========== Anti-bloat 配置（Nuitka 官方推荐减少依赖膨胀）==========
+        self.log("\n应用 Anti-bloat 配置（减少依赖膨胀）...")
+
+        # 排除 pytest（测试框架）
+        if nuitka_opts.get("noinclude_pytest", True):
+            cmd.append("--noinclude-pytest-mode=nofollow")
+            self.log("  ✓ 排除 pytest 及其依赖")
+
+        # 排除 setuptools（打包工具）
+        if nuitka_opts.get("noinclude_setuptools", True):
+            cmd.append("--noinclude-setuptools-mode=nofollow")
+            self.log("  ✓ 排除 setuptools 及 pkg_resources")
+
+        # 排除 unittest（标准测试库）
+        if nuitka_opts.get("noinclude_unittest", True):
+            cmd.append("--noinclude-unittest-mode=nofollow")
+            self.log("  ✓ 排除 unittest 模块")
+
+        # 排除 IPython（交互式解释器）
+        if nuitka_opts.get("noinclude_ipython", True):
+            cmd.append("--noinclude-IPython-mode=nofollow")
+            self.log("  ✓ 排除 IPython 及其大量依赖")
+
+        # 排除 dask（分布式计算）
+        if nuitka_opts.get("noinclude_dask", True):
+            cmd.append("--noinclude-dask-mode=nofollow")
+            self.log("  ✓ 排除 dask 并行计算框架")
+
+        # ========== 部署模式（Nuitka 官方推荐用于生产发布）==========
+        if nuitka_opts.get("deployment", False):
+            cmd.append("--deployment")
+            self.log("✓ 已启用部署模式（移除调试助手，减小体积）")
+            self.log("  ⚠ 注意：部署模式会移除 fork bomb 检测等安全功能")
+
+        # ========== Onefile 临时目录配置（避免 Windows 防火墙问题）==========
+        tempdir_spec = nuitka_opts.get("onefile_tempdir_spec", "")
+        if tempdir_spec and config.get("onefile", True):
+            cmd.append(f"--onefile-tempdir-spec={tempdir_spec}")
+            self.log(f"✓ Onefile 临时目录: {tempdir_spec}")
+            if "{CACHE_DIR}" in tempdir_spec:
+                self.log("  ℹ 使用缓存目录可避免 Windows 防火墙每次询问")
+
+        # ========== 编译报告（Nuitka 官方推荐用于问题诊断）==========
+        if nuitka_opts.get("generate_report", False):
+            report_path = nuitka_opts.get("report_path", "") or "compilation-report.xml"
+            report_full_path = os.path.join(output_dir, report_path)
+            cmd.append(f"--report={report_full_path}")
+            self.log(f"✓ 将生成编译报告: {report_full_path}")
+
+        # ========== 用户包配置文件（Nuitka 官方推荐用于特殊包处理）==========
+        user_config = nuitka_opts.get("user_package_config", "")
+        if user_config and os.path.exists(user_config):
+            cmd.append(f"--user-package-configuration-file={user_config}")
+            self.log(f"✓ 使用用户包配置文件: {user_config}")
 
         # 与 1.bat 一致的优化参数
         # 注意：--no-pyi-file 仅在模块模式下有效，standalone模式不需要
         # 注意：--follow-stdlib 是 standalone 模式的默认行为，无需显式指定
         cmd.append("--no-prefer-source-code")
-        cmd.append("--assume-yes-for-downloads")
+
+        # ========== 强制指定 GCC 编译器 ==========
+        # 明确告诉 Nuitka 使用 mingw64，防止它自动选择 MSVC
+        self.log("\n强制 Nuitka 使用 GCC/MinGW 编译器...")
+        cmd.append("--mingw64")
+        self.log("✓ 已添加 --mingw64 参数，强制使用 GCC 编译器")
+
+        # 自动下载
+        if nuitka_opts.get("assume_yes_downloads", True):
+            cmd.append("--assume-yes-for-downloads")
 
         # 输出目录
         cmd.append(f"--output-dir={output_dir}")
 
         # 显示输出信息
-        cmd.append("--show-progress")
-        cmd.append("--show-memory")
+        if nuitka_opts.get("show_progress", True):
+            cmd.append("--show-progress")
+        if nuitka_opts.get("show_memory", True):
+            cmd.append("--show-memory")
+        if nuitka_opts.get("show_scons", False):
+            cmd.append("--show-scons")
+            self.log("✓ 将显示 Scons 编译命令（调试用）")
 
         # 直接使用原始脚本作为入口（与 1.bat 一致，不注入任何代码）
         cmd.append(script_path)
@@ -4245,8 +5017,26 @@ except:
                         else:
                             self.log("无需清理缓存文件")
 
+                    # 检查是否需要后处理添加中文版本信息
+                    if hasattr(self, '_pending_version_info') and self._pending_version_info:
+                        self.log("\n后处理: 添加中文版本信息...")
+                        post_success = self._post_process_add_version_info(exe_path)
+                        if post_success:
+                            self.log("✓ 中文版本信息添加成功")
+                        else:
+                            self.log("⚠️  中文版本信息添加失败，exe 仍可正常运行")
+                        # 清理临时数据
+                        self._pending_version_info = None
+
                     # 保存 exe 路径用于后续打开目录
                     self._last_exe_path = exe_path
+
+                    # 如果禁用了控制台，提供诊断提示
+                    if not config.get("console", False):
+                        self.log("\n提示: 如果 exe 无法运行，可以通过命令行运行来查看错误信息：")
+                        self.log(f'  cd "{os.path.dirname(exe_path)}"')
+                        self.log(f'  "{os.path.basename(exe_path)}"')
+
                     return True, f"打包成功！\n\n输出文件: {exe_path}"
 
                 return False, "打包完成，但未找到输出文件"

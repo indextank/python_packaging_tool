@@ -5,7 +5,7 @@ Python打包工具 - 版本信息
 """
 
 # 版本号
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 VERSION = __version__
 
 # 版本号元组，方便比较

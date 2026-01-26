@@ -4,13 +4,19 @@
 负责自动下载和安装UPX、GCC等工具，支持多镜像源pip安装。
 """
 
+import json
 import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from typing import Callable, List, Optional
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 # Windows 子进程隐藏标志
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
@@ -33,6 +39,56 @@ class DependencyManager:
     def __init__(self, log_callback: Optional[Callable] = None):
         self.log = log_callback if log_callback else print
         self._current_mirror_index = 0  # 当前使用的镜像源索引
+
+    def _fetch_json(self, url: str, headers: Optional[dict] = None, timeout: int = 30) -> dict:
+        """获取 JSON 数据（支持 requests 或 urllib 回退）"""
+        if requests:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status >= 400:
+                raise RuntimeError(f"HTTP {resp.status}: {url}")
+            data = resp.read().decode("utf-8", errors="replace")
+            return json.loads(data)
+
+    def _download_file(self, url: str, dest_path: str,
+                       headers: Optional[dict] = None, timeout: int = 120) -> None:
+        """下载文件（支持 requests 或 urllib 回退）"""
+        if requests:
+            response = requests.get(url, headers=headers, stream=True, timeout=timeout)
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded_size = 0
+
+            with open(dest_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_size += len(chunk)
+                        if total_size > 0:
+                            progress = int((downloaded_size / total_size) * 100)
+                            if progress % 10 == 0:
+                                self.log(f"下载进度: {progress}%")
+            return
+
+        req = urllib.request.Request(url, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            total_size = int(resp.headers.get('Content-Length', 0))
+            downloaded_size = 0
+            with open(dest_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+                    if total_size > 0:
+                        progress = int((downloaded_size / total_size) * 100)
+                        if progress % 10 == 0:
+                            self.log(f"下载进度: {progress}%")
 
     def get_appdata_dir(self) -> str:
         """获取当前用户的AppData目录"""
@@ -162,10 +218,7 @@ class DependencyManager:
             headers = {'User-Agent': 'Python-Packaging-Tool'}
 
             self.log("获取UPX最新版本...")
-            response = requests.get(api_url, headers=headers, timeout=30)
-            response.raise_for_status()
-
-            release_data = response.json()
+            release_data = self._fetch_json(api_url, headers=headers, timeout=30)
             assets = release_data.get('assets', [])
 
             # 查找win64版本
@@ -184,21 +237,7 @@ class DependencyManager:
             zip_path = os.path.join(install_dir, "upx.zip")
             self.log(f"下载URL: {download_url}")
 
-            response = requests.get(download_url, headers=headers, stream=True, timeout=120)
-            response.raise_for_status()
-
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded_size = 0
-
-            with open(zip_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-                        if total_size > 0:
-                            progress = int((downloaded_size / total_size) * 100)
-                            if progress % 10 == 0:
-                                self.log(f"下载进度: {progress}%")
+            self._download_file(download_url, zip_path, headers=headers, timeout=120)
 
             self.log("下载完成，正在解压...")
 
@@ -271,10 +310,7 @@ class DependencyManager:
                 api_url = "https://api.github.com/repos/brechtsanders/winlibs_mingw/releases/latest"
                 headers = {'User-Agent': 'Python-Packaging-Tool'}
 
-                response = requests.get(api_url, headers=headers, timeout=30)
-                response.raise_for_status()
-
-                release_data = response.json()
+                release_data = self._fetch_json(api_url, headers=headers, timeout=30)
                 assets = release_data.get('assets', [])
 
                 # 查找合适的版本
@@ -315,21 +351,7 @@ class DependencyManager:
                 self.log(f"URL: {download_url}")
 
                 # 下载到临时文件
-                response = requests.get(download_url, headers=headers, stream=True, timeout=120)
-                response.raise_for_status()
-
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded_size = 0
-
-                with open(temp_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-                            if total_size > 0:
-                                progress = int((downloaded_size / total_size) * 100)
-                                if progress % 10 == 0:
-                                    self.log(f"下载进度: {progress}%")
+                self._download_file(download_url, temp_path, headers=headers, timeout=120)
 
                 self.log("下载完成，验证文件完整性...")
 
@@ -361,12 +383,13 @@ class DependencyManager:
                 self.log(f"✓ GCC工具链下载成功: {file_path}")
                 return file_path
 
-            except requests.exceptions.Timeout:
-                self.log(f"第{attempt}次下载超时，重试...")
-            except requests.exceptions.RequestException as e:
-                self.log(f"第{attempt}次下载失败: {str(e)}，重试...")
             except Exception as e:
-                self.log(f"第{attempt}次下载出错: {str(e)}，重试...")
+                if requests and isinstance(e, requests.exceptions.Timeout):
+                    self.log(f"第{attempt}次下载超时，重试...")
+                elif requests and isinstance(e, requests.exceptions.RequestException):
+                    self.log(f"第{attempt}次下载失败: {str(e)}，重试...")
+                else:
+                    self.log(f"第{attempt}次下载出错: {str(e)}，重试...")
 
             # 清理临时文件
             temp_path = os.path.join(cache_dir, "*.tmp")

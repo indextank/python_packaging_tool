@@ -611,7 +611,61 @@ chore: 构建/工具链相关
 
 ## 📝 更新日志
 
-### v1.3.0 (最新)
+### v1.5.1 (最新)
+
+**🔧 维护更新**
+
+- 修复若干小问题
+- 优化代码稳定性
+
+### v1.4.0
+
+**🚀 重大更新：Nuitka 官方最佳实践集成**
+
+基于 [Nuitka 官方文档](https://nuitka.net/user-documentation/) 进行全面优化：
+
+- ✨ **Anti-bloat 配置（减少依赖膨胀）**
+  - 自动排除 pytest、setuptools、unittest、IPython、dask 等开发/测试包
+  - 支持自定义排除模块列表
+  - 大幅减少编译时间和最终文件体积
+
+- ✨ **Python 标志优化**
+  - `--python-flag=no_docstrings`：移除文档字符串
+  - `--python-flag=no_asserts`：禁用断言语句
+  - `--python-flag=no_warnings`：禁用运行时警告（可选）
+  - `--python-flag=no_annotations`：移除类型注解（可选）
+
+- ✨ **部署模式支持**
+  - `--deployment` 选项移除所有调试助手
+  - 适用于生产环境发布，减小文件体积
+
+- ✨ **Onefile 临时目录配置**
+  - 支持 `--onefile-tempdir-spec` 配置
+  - 使用缓存目录避免 Windows 防火墙每次询问
+  - 可用变量：`{CACHE_DIR}`, `{COMPANY}`, `{PRODUCT}`, `{VERSION}` 等
+
+- ✨ **编译报告生成**
+  - 支持 `--report` 生成 XML 编译报告
+  - 包含模块使用、时间统计等信息，便于问题诊断
+
+- ✨ **用户包配置文件支持**
+  - 支持 `--user-package-configuration-file` 自定义 YAML 配置
+  - 处理特殊第三方包的数据文件和 DLL 需求
+
+- ✨ **低内存模式**
+  - `--low-memory` 选项减少编译时内存使用
+  - 适用于内存有限的系统
+
+- 🔧 **新增 Nuitka 高级选项对话框**
+  - 图形化配置所有最佳实践选项
+  - 实时预览命令行参数
+  - 支持重置为默认设置
+
+- 📦 **新增模块**
+  - `core/nuitka_config.py`：Nuitka 配置数据类和最佳实践
+  - `gui/dialogs/nuitka_options_dialog.py`：高级选项配置对话框
+
+### v1.3.0
 
 **🛡️ 重大更新：三层防护机制**
 

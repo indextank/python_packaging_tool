@@ -169,33 +169,48 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
             border: 1px solid {colors.accent_primary};
         }}
 
+        /* Default Button (Gray) */
         QPushButton {{
-            background-color: {colors.accent_primary};
-            color: white;
-            border: none;
+            background-color: {colors.background_tertiary};
+            color: {colors.text_primary};
+            border: 1px solid {colors.border_primary};
             border-radius: 3px;
             padding: 8px 16px;
             min-width: 80px;
         }}
 
         QPushButton:hover {{
-            background-color: {colors.accent_hover};
+            background-color: {colors.border_primary};
         }}
 
         QPushButton:pressed {{
-            background-color: {colors.accent_pressed};
+            background-color: {colors.border_secondary};
         }}
 
         QPushButton:disabled {{
-            background-color: {colors.border_primary};
+            background-color: {colors.background_tertiary};
             color: {colors.text_disabled};
+            border-color: {colors.border_secondary};
         }}
 
-        /* Secondary Button (Gray) */
-        QPushButton[buttonType="secondary"] {{
-            background-color: {colors.background_tertiary};
-            color: {colors.text_primary};
-            border: 1px solid {colors.border_primary};
+        /* Primary Button (Blue) */
+        QPushButton[buttonType="primary"] {{
+            background-color: {colors.accent_primary};
+            color: white;
+            border: none;
+        }}
+
+        QPushButton[buttonType="primary"]:hover {{
+            background-color: {colors.accent_hover};
+        }}
+
+        QPushButton[buttonType="primary"]:pressed {{
+            background-color: {colors.accent_pressed};
+        }}
+
+        QPushButton[buttonType="primary"]:disabled {{
+            background-color: {colors.border_primary};
+            color: {colors.text_disabled};
         }}
 
         QPushButton[buttonType="secondary"]:hover {{
@@ -404,20 +419,20 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
         }}
 
         QMessageBox QPushButton {{
-            background-color: {colors.accent_primary};
-            color: white;
-            border: none;
+            background-color: {colors.background_tertiary};
+            color: {colors.text_primary};
+            border: 1px solid {colors.border_primary};
             border-radius: 3px;
             padding: 6px 20px;
             min-width: 80px;
         }}
 
         QMessageBox QPushButton:hover {{
-            background-color: {colors.accent_hover};
+            background-color: {colors.border_primary};
         }}
 
         QMessageBox QPushButton:pressed {{
-            background-color: {colors.accent_pressed};
+            background-color: {colors.border_secondary};
         }}
 
         /* FileDialog Styling */
@@ -431,16 +446,16 @@ def generate_base_stylesheet(colors: ThemeColors) -> str:
         }}
 
         QFileDialog QPushButton {{
-            background-color: {colors.accent_primary};
-            color: white;
-            border: none;
+            background-color: {colors.background_tertiary};
+            color: {colors.text_primary};
+            border: 1px solid {colors.border_primary};
             border-radius: 3px;
             padding: 6px 16px;
             min-width: 80px;
         }}
 
         QFileDialog QPushButton:hover {{
-            background-color: {colors.accent_hover};
+            background-color: {colors.border_primary};
         }}
     """
 
@@ -478,19 +493,20 @@ def get_message_box_stylesheet(colors: ThemeColors) -> str:
             background-color: transparent;
         }}
         QMessageBox QPushButton {{
-            background-color: {colors.accent_primary};
-            color: white;
-            border: none;
+            background-color: {colors.background_tertiary};
+            color: {colors.text_primary};
+            border: 1px solid {colors.border_primary};
             border-radius: 3px;
             padding: 6px 20px;
             min-width: 80px;
-            min-height: 24px;
         }}
+
         QMessageBox QPushButton:hover {{
-            background-color: {colors.accent_hover};
+            background-color: {colors.border_primary};
         }}
+
         QMessageBox QPushButton:pressed {{
-            background-color: {colors.accent_pressed};
+            background-color: {colors.border_secondary};
         }}
     """
 
