@@ -173,6 +173,9 @@ class MainWindow(QMainWindow):
         # 控制台自动管理（根据脚本自动判断）
         self._console_auto_managed = True
 
+        # 图标手动选择标志（防止自动加载覆盖用户选择）
+        self._icon_manually_set = False
+
         # Nuitka 高级选项（基于最佳实践）
         self.nuitka_advanced_options = {}
 
@@ -192,6 +195,10 @@ class MainWindow(QMainWindow):
     def _load_settings(self) -> None:
         """加载保存的设置"""
         self._load_theme_setting()
+
+        # 自动加载 GCC 配置（如果在 Nuitka 模式下）
+        if hasattr(self, 'nuitka_radio') and self.nuitka_radio.isChecked():
+            self.load_gcc_config()
 
     def _apply_initial_theme(self) -> None:
         """应用初始主题"""
@@ -671,14 +678,15 @@ class MainWindow(QMainWindow):
         tool_layout = QVBoxLayout(tool_group)
 
         tool_radio_layout = QHBoxLayout()
-        self.pyinstaller_radio = QRadioButton("PyInstaller")
-        self.pyinstaller_radio.setChecked(True)
-        self.pyinstaller_radio.toggled.connect(self.on_tool_changed)
         self.nuitka_radio = QRadioButton("Nuitka")
+        self.nuitka_radio.setChecked(True)
         self.nuitka_radio.toggled.connect(self.on_tool_changed)
 
-        tool_radio_layout.addWidget(self.pyinstaller_radio)
+        self.pyinstaller_radio = QRadioButton("PyInstaller")
+        self.pyinstaller_radio.toggled.connect(self.on_tool_changed)
+
         tool_radio_layout.addWidget(self.nuitka_radio)
+        tool_radio_layout.addWidget(self.pyinstaller_radio)
         tool_radio_layout.addStretch()
         tool_layout.addLayout(tool_radio_layout)
 
@@ -715,7 +723,7 @@ class MainWindow(QMainWindow):
         gcc_widget_layout.addWidget(self.gcc_download_label)
 
         tool_layout.addWidget(self.gcc_widget)
-        self.gcc_widget.setVisible(False)
+        self.gcc_widget.setVisible(self.nuitka_radio.isChecked())
 
         parent_layout.addWidget(tool_group)
 
@@ -740,8 +748,14 @@ class MainWindow(QMainWindow):
         self.venv_check.setToolTip("在虚拟环境中打包以隔离依赖")
 
         self.upx_check = QCheckBox("使用UPX压缩")
-        self.upx_check.setChecked(True)
+        self.upx_check.setChecked(True)  # Nuitka 默认开启 UPX
         self.upx_check.setToolTip("压缩exe体积（需安装UPX）")
+        # 初始可见性根据工具选择决定
+        if hasattr(self, 'nuitka_radio'):
+            is_nuitka = self.nuitka_radio.isChecked()
+            self.upx_check.setVisible(is_nuitka)
+            if not is_nuitka:
+                self.upx_check.setChecked(False)
 
         self.console_check = QCheckBox("显示控制台窗口")
         self.console_check.setChecked(False)
@@ -852,20 +866,20 @@ class MainWindow(QMainWindow):
         # 获取项目目录和脚本路径
         project_dir = self.project_dir_edit.text().strip() if hasattr(self, 'project_dir_edit') else ""
         script_path = self.script_path_edit.text().strip() if hasattr(self, 'script_path_edit') else ""
-        
+
         # 要搜索的文件列表（按优先级）
         files_to_search = []
-        
+
         # 需要跳过的目录（避免搜索虚拟环境等）
-        skip_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__", 
-                    ".git", "node_modules", "site-packages", ".tox", 
+        skip_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__",
+                    ".git", "node_modules", "site-packages", ".tox",
                     ".pytest_cache", "egg-info", ".eggs", ".idea", ".vscode"}
-        
+
         # 1. 优先全项目递归查找所有 version.py 文件（version.py 优先于 main.py）
         if project_dir and os.path.isdir(project_dir):
             version_files = []
             main_files = []
-            
+
             # 先查找根目录
             root_version = os.path.join(project_dir, "version.py")
             root_main = os.path.join(project_dir, "main.py")
@@ -873,12 +887,12 @@ class MainWindow(QMainWindow):
                 version_files.append(root_version)
             if os.path.exists(root_main):
                 main_files.append(root_main)
-            
+
             # 递归查找所有子目录
             for root, dirs, files in os.walk(project_dir):
                 # 跳过不需要搜索的目录
                 dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith('.')]
-                
+
                 # 收集所有 version.py 和 main.py
                 if "version.py" in files:
                     vf_path = os.path.join(root, "version.py")
@@ -888,19 +902,19 @@ class MainWindow(QMainWindow):
                     mf_path = os.path.join(root, "main.py")
                     if mf_path not in main_files:
                         main_files.append(mf_path)
-            
+
             # 优先使用 version.py，如果没找到才使用 main.py
             if version_files:
                 files_to_search.extend(version_files)
             elif main_files:
                 files_to_search.extend(main_files)
-        
+
         # 2. 如果还是没找到，从脚本文件本身查找
         if not files_to_search and script_path and os.path.isfile(script_path):
             # 只处理 Python 文件
             if script_path.lower().endswith(('.py', '.pyw')):
                 files_to_search.append(script_path)
-        
+
         # 如果没有可搜索的文件，直接返回
         if not files_to_search:
             return detected_info
@@ -921,7 +935,7 @@ class MainWindow(QMainWindow):
                         if match:
                             detected_info["version"] = match.group(1)
                             break
-                    
+
                     # 如果 VERSION 没找到，再尝试 __version__
                     if not detected_info["version"]:
                         for quote in ['"', "'"]:
@@ -955,7 +969,7 @@ class MainWindow(QMainWindow):
                             else:
                                 detected_info["copyright"] = copyright_text
                             break
-                    
+
                     # 如果 f-string 没匹配到，尝试普通字符串格式
                     if not detected_info["copyright"]:
                         for quote in ['"', "'"]:
@@ -1015,10 +1029,10 @@ class MainWindow(QMainWindow):
                             detected_info["copyright"] = f"Copyright © {year} {author}"
                             break
 
-            except Exception as e:
+            except Exception:
                 # 如果读取文件出错，继续尝试下一个文件
                 continue
-        
+
         return detected_info
 
     def _show_version_info_dialog(self) -> None:
@@ -1037,33 +1051,29 @@ class MainWindow(QMainWindow):
             temp_packager = Packager()
             sdk_supported, sdk_message = temp_packager.check_windows_sdk_support()
 
-        # 根据打包方式和 SDK 支持决定使用中文还是英文
-        # Nuitka 默认使用英文，除非检测到 Windows SDK
-        use_english = is_nuitka and not sdk_supported
-
         # 合并检测到的信息和现有信息
         # 优先使用检测到的值，直接覆盖现有值
-        
+
         # 产品名称：优先使用 APP_NAME，不存在则使用 APP_NAME_EN
         if detected_info.get("product_name"):
             self.version_info["product_name"] = detected_info["product_name"]
         elif detected_info.get("product_name_en"):
             self.version_info["product_name"] = detected_info["product_name_en"]
-        
+
         # 文件描述：优先使用 DESCRIPTION，不存在则使用 DESCRIPTION_EN
         if detected_info.get("file_description"):
             self.version_info["file_description"] = detected_info["file_description"]
         elif detected_info.get("file_description_en"):
             self.version_info["file_description"] = detected_info["file_description_en"]
-        
+
         # 版权信息：直接使用检测到的值（如果存在）
         if detected_info.get("copyright"):
             self.version_info["copyright"] = detected_info["copyright"]
-        
+
         # 版本号：直接使用检测到的值（如果存在）
         if detected_info.get("version"):
             self.version_info["version"] = detected_info["version"]
-        
+
 
         dialog = QDialog(self)
         dialog.setWindowTitle("添加版权信息")
@@ -1158,10 +1168,10 @@ class MainWindow(QMainWindow):
             # 重新检测以确定实际找到的文件路径
             project_dir = self.project_dir_edit.text().strip() if hasattr(self, 'project_dir_edit') else ""
             script_path = self.script_path_edit.text().strip() if hasattr(self, 'script_path_edit') else ""
-            
+
             source_text = ""
             found_file = None
-            
+
             # 查找实际使用的文件路径
             if project_dir and os.path.isdir(project_dir):
                 # 先检查根目录
@@ -1170,15 +1180,15 @@ class MainWindow(QMainWindow):
                     if os.path.exists(vf_path):
                         found_file = vf_path
                         break
-                
+
                 # 如果根目录没找到，查找子目录
                 if not found_file:
-                    skip_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__", 
-                                ".git", "node_modules", "site-packages", ".tox", 
+                    skip_dirs = {".venv", "venv", "env", "build", "dist", "__pycache__",
+                                ".git", "node_modules", "site-packages", ".tox",
                                 ".pytest_cache", "egg-info", ".eggs", ".idea", ".vscode"}
-                    
+
                     priority_dirs = ["core", "src", "lib", "utils", "config"]
-                    
+
                     # 先查找常见子目录
                     for priority_dir in priority_dirs:
                         for vf in ["version.py", "main.py"]:
@@ -1188,7 +1198,7 @@ class MainWindow(QMainWindow):
                                 break
                         if found_file:
                             break
-                    
+
                     # 如果优先目录没找到，递归查找
                     if not found_file:
                         for root, dirs, files in os.walk(project_dir):
@@ -1199,12 +1209,12 @@ class MainWindow(QMainWindow):
                                     break
                             if found_file:
                                 break
-            
+
             # 如果还是没找到，使用脚本文件
             if not found_file and script_path and os.path.isfile(script_path):
                 if script_path.lower().endswith(('.py', '.pyw')):
                     found_file = script_path
-            
+
             # 生成提示文本
             if found_file:
                 # 计算相对路径用于显示
@@ -1213,7 +1223,7 @@ class MainWindow(QMainWindow):
                     source_text = f"项目 {rel_path}"
                 else:
                     source_text = f"文件 {os.path.basename(found_file)}"
-            
+
             if source_text:
                 detect_tip = QLabel(f"✓ 已从 {source_text} 中检测到版本信息")
             else:
@@ -1525,6 +1535,9 @@ class MainWindow(QMainWindow):
         # Update previous project directory
         self._previous_project_dir = project_dir
 
+        # 重置图标手动选择标志，允许新项目自动加载图标
+        self._icon_manually_set = False
+
         # 检测并清空 build 目录（仅对项目目录操作，单独脚本不处理）
         self._check_and_clean_build_dir(project_dir)
 
@@ -1560,8 +1573,11 @@ class MainWindow(QMainWindow):
         if dir_name:
             self.program_name_edit.setText(dir_name)
 
-        # Auto-load icon from project directory - always update when project dir changes
-        self._auto_load_project_icon(project_dir, force_update=True)
+        # Auto-load icon from project directory - only if user hasn't manually set an icon
+        if not self._icon_manually_set:
+            self._auto_load_project_icon(project_dir, force_update=True)
+        else:
+            self.append_log("已保留用户手动选择的图标，跳过自动加载")
         # Reset version info so dialog re-detects from new project
         self._reset_version_info_on_project_change(project_dir)
 
@@ -1893,7 +1909,8 @@ class MainWindow(QMainWindow):
                 dir_name = os.path.basename(script_dir)
                 if dir_name:
                     self.program_name_edit.setText(dir_name)
-            self._auto_load_project_icon(script_dir, force_update=True)
+            if not self._icon_manually_set:
+                self._auto_load_project_icon(script_dir, force_update=True)
             self._reset_version_info_on_project_change(script_dir)
 
         # 从脚本名称设置程序名称
@@ -1934,6 +1951,15 @@ class MainWindow(QMainWindow):
 
         # Show/hide Nuitka-specific options
         self.gcc_widget.setVisible(is_nuitka)
+
+        # PyInstaller: 隐藏 UPX 选项（由于兼容性问题强制禁用）
+        # Nuitka: 显示 UPX 选项（如果用户想用）
+        if hasattr(self, 'upx_check'):
+            self.upx_check.setVisible(is_nuitka)
+            if is_nuitka:
+                self.upx_check.setChecked(True)
+            else:
+                self.upx_check.setChecked(False)
 
         # Load GCC config for Nuitka
         if is_nuitka and not self.gcc_config_loaded and not self.gcc_config_loading:
@@ -2002,6 +2028,7 @@ class MainWindow(QMainWindow):
             "console": self.console_check.isChecked(),
             "clean": self.clean_check.isChecked(),
             "upx": self.upx_check.isChecked(),
+            "use_venv": self.venv_check.isChecked(),
             "lto": True,  # 默认启用LTO链接优化
             "python_opt": True,  # 默认启用Python优化
             "exclude_modules": exclude_modules,
@@ -2430,6 +2457,29 @@ class MainWindow(QMainWindow):
                     self.log_signal.emit("\n" + "=" * 50)
                     self.log_signal.emit("打包成功！")
                     self.log_signal.emit("=" * 50)
+
+                    # 添加图标相关提示
+                    icon_path = config.get("icon_path") or config.get("icon")
+                    if icon_path:
+                        self.log_signal.emit("\n【图标说明】")
+                        self.log_signal.emit(f"  已使用图标: {icon_path}")
+                        self.log_signal.emit("")
+                        self.log_signal.emit("  如果 exe 文件图标显示不正确：")
+                        self.log_signal.emit("  ─────────────────────────────────")
+                        self.log_signal.emit("  1. Windows 图标缓存问题（最常见）:")
+                        self.log_signal.emit("     • 方法A: 在任务管理器中重启 explorer.exe")
+                        self.log_signal.emit("     • 方法B: 运行命令 ie4uinit.exe -show")
+                        self.log_signal.emit("     • 方法C: 重新登录 Windows 账户或重启电脑")
+                        self.log_signal.emit("")
+                        self.log_signal.emit("  2. 验证 exe 实际嵌入的图标:")
+                        self.log_signal.emit("     • 右键点击 exe 文件 → 属性 → 详细信息")
+                        self.log_signal.emit("     • 或使用 Resource Hacker 工具查看 exe 资源")
+                        self.log_signal.emit("")
+                        self.log_signal.emit("  3. 运行时窗口/任务栏图标不显示:")
+                        self.log_signal.emit("     • 这需要在应用程序代码中设置，打包工具无法自动处理")
+                        self.log_signal.emit("     • PyQt/PySide: app.setWindowIcon(QIcon('icon.ico'))")
+                        self.log_signal.emit("     • Tkinter: root.iconbitmap('icon.ico')")
+                        self.log_signal.emit("     • 图标文件需通过 extra_data 选项包含到打包中")
 
                     self.finished_signal.emit(True, message)
 

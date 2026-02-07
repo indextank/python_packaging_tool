@@ -11,15 +11,14 @@ import sys
 import urllib.error
 import urllib.request
 import zipfile
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 try:
     import requests
 except ImportError:
     requests = None
 
-# Windows 子进程隐藏标志
-CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+from utils.constants import CREATE_NO_WINDOW
 
 
 class DependencyManager:
@@ -90,6 +89,27 @@ class DependencyManager:
                         if progress % 10 == 0:
                             self.log(f"下载进度: {progress}%")
 
+    def verify_zip_file(self, file_path: str) -> bool:
+        """
+        验证zip文件是否完整有效
+
+        Args:
+            file_path: zip文件路径
+
+        Returns:
+            是否有效
+        """
+        if not os.path.exists(file_path):
+            return False
+
+        try:
+            with zipfile.ZipFile(file_path, 'r') as zip_ref:
+                # 测试zip文件完整性
+                bad_file = zip_ref.testzip()
+                return bad_file is None
+        except (zipfile.BadZipFile, Exception):
+            return False
+
     def get_appdata_dir(self) -> str:
         """获取当前用户的AppData目录"""
         return os.path.expanduser(r"~\AppData")
@@ -147,11 +167,11 @@ class DependencyManager:
         """将目录永久添加到系统PATH环境变量"""
         if sys.platform != "win32":
             return False
-            
+
         try:
             import ctypes
             import winreg
-            
+
             key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER, r"Environment", 0,
                 winreg.KEY_READ | winreg.KEY_WRITE
@@ -550,7 +570,6 @@ class DependencyManager:
         Returns:
             安装是否成功
         """
-        start_index = self._current_mirror_index
         tried_mirrors = 0
         total_mirrors = len(self.PIP_MIRRORS)
 
@@ -621,6 +640,6 @@ class DependencyManager:
                 continue
 
         # 所有镜像源都失败
-        self.log(f"警告: 所有镜像源均安装失败")
+        self.log("警告: 所有镜像源均安装失败")
         self._current_mirror_index = 0
         return False

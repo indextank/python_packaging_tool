@@ -5,8 +5,14 @@ Python打包工具 - 版本信息
 """
 
 # 版本号
-__version__ = "1.5.1"
+__version__ = "1.5.3"
 VERSION = __version__
+
+# 构建日期（用于显示，不参与Windows文件版本号）
+BUILD_DATE = "20260207"
+
+# 完整显示版本（用于UI显示）
+DISPLAY_VERSION = f"{__version__}.{BUILD_DATE}"
 
 # 版本号元组，方便比较
 VERSION_TUPLE = tuple(int(x) for x in __version__.split("."))
@@ -15,7 +21,7 @@ VERSION_TUPLE = tuple(int(x) for x in __version__.split("."))
 APP_NAME = "Python脚本打包工具"
 APP_NAME_EN = "Python Packaging Tool"
 APP_NOTICE = "免费软件，禁止贩卖！"
-APP_TITLE = f"{APP_NAME} v{__version__}  - {APP_NOTICE}"
+APP_TITLE = f"{APP_NAME} v{DISPLAY_VERSION}  - {APP_NOTICE}"
 
 # 作者信息
 AUTHOR = "徽哥"
@@ -47,7 +53,7 @@ def get_version_tuple() -> tuple:
 def get_app_info() -> dict:
     """获取应用程序完整信息"""
     return {
-        "version": __version__,
+        "version": DISPLAY_VERSION,
         "version_tuple": VERSION_TUPLE,
         "app_name": APP_NAME,
         "app_name_en": APP_NAME_EN,
@@ -64,7 +70,7 @@ def get_about_html() -> str:
     """获取关于对话框的HTML内容"""
     return f"""
 <h2>{APP_NAME}</h2>
-<p><b>版本：</b>{__version__}</p>
+<p><b>版本：</b>{DISPLAY_VERSION}</p>
 <p><b>作者：</b>{AUTHOR}</p>
 <p><strong>---------------------------------------------------</strong><br/><br/>{ABOUT_TEXT}<br/><br/><strong>---------------------------------------------------</strong></p>
 <p><b>联系邮箱：</b>{AUTHOR_EMAIL}</p>

@@ -5,14 +5,10 @@
 """
 
 import subprocess
-import sys
 import traceback
 from typing import Any, Callable, Dict, Optional
 
 from PyQt6.QtCore import QMutex, QObject, QRunnable, QThread, pyqtSignal, pyqtSlot
-
-# Windows子进程隐藏控制台窗口标志
-CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 def _handle_worker_exception(signals: "WorkerSignals", prefix: str, e: Exception) -> None:

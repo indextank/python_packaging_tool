@@ -1453,6 +1453,46 @@ if "!VERSION_CONVERTED!"=="0" (
     set "WIN_VERSION=1.0.0.0"
 )
 
+REM Validate each version component (Windows file version requires each part to be 0-65535)
+echo [VERSION] Validating version components...
+set "VER_VALID_P1=0"
+set "VER_VALID_P2=0"
+set "VER_VALID_P3=0"
+set "VER_VALID_P4=0"
+for /f "tokens=1-4 delims=." %%a in ("!WIN_VERSION!") do (
+    set "VER_VALID_P1=%%a"
+    set "VER_VALID_P2=%%b"
+    set "VER_VALID_P3=%%c"
+    set "VER_VALID_P4=%%d"
+)
+set "VERSION_FIXED=false"
+if !VER_VALID_P1! GTR 65535 (
+    echo [WARNING] Version part 1 ^(!VER_VALID_P1!^) exceeds 65535, resetting to 0
+    set "VER_VALID_P1=0"
+    set "VERSION_FIXED=true"
+)
+if !VER_VALID_P2! GTR 65535 (
+    echo [WARNING] Version part 2 ^(!VER_VALID_P2!^) exceeds 65535, resetting to 0
+    set "VER_VALID_P2=0"
+    set "VERSION_FIXED=true"
+)
+if !VER_VALID_P3! GTR 65535 (
+    echo [WARNING] Version part 3 ^(!VER_VALID_P3!^) exceeds 65535, resetting to 0
+    set "VER_VALID_P3=0"
+    set "VERSION_FIXED=true"
+)
+if !VER_VALID_P4! GTR 65535 (
+    echo [WARNING] Version part 4 ^(!VER_VALID_P4!^) exceeds 65535, resetting to 0
+    set "VER_VALID_P4=0"
+    set "VERSION_FIXED=true"
+)
+if "!VERSION_FIXED!"=="true" (
+    set "WIN_VERSION=!VER_VALID_P1!.!VER_VALID_P2!.!VER_VALID_P3!.!VER_VALID_P4!"
+    echo [WARNING] Version adjusted to valid Windows format: !WIN_VERSION!
+    echo [WARNING] Note: Windows file version requires each component to be 0-65535
+    echo [WARNING] Consider changing __version__ in version.py to a format like "1.5.2" instead of including a date suffix
+)
+
 REM Add version info - use Windows resource file for Chinese characters support
 echo [DEBUG-VERSION] Final WIN_VERSION after conversion: [!WIN_VERSION!]
 echo [VERSION] File version: !WIN_VERSION!
@@ -1624,6 +1664,16 @@ if not "!ICON_PARAM!"=="" (
             )
         )
     )
+)
+
+REM Include icon_convert_helper.py as data file for subprocess icon conversion
+REM When running as packaged exe, Pillow is not available in the bundled Python,
+REM so icon conversion is done via subprocess using the target project's venv Python.
+REM This helper script needs to be accessible as a regular .py file at runtime.
+set "HELPER_SCRIPT=!PROJECT_ROOT!core\packaging\icon_convert_helper.py"
+if exist "!HELPER_SCRIPT!" (
+    set "NUITKA_CMD=!NUITKA_CMD! --include-data-file=!HELPER_SCRIPT!=core/packaging/icon_convert_helper.py"
+    call :log_echo [INFO] Including icon_convert_helper.py for subprocess icon conversion
 )
 
 REM Add extra parameters check if contains deprecated console parameters

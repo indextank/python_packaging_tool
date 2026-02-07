@@ -24,11 +24,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-# Windows 子进程隐藏标志
-if sys.platform == "win32":
-    CREATE_NO_WINDOW = 0x08000000
-else:
-    CREATE_NO_WINDOW = 0
+from utils.constants import CREATE_NO_WINDOW
 
 
 class CompilationMode(Enum):
