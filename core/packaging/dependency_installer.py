@@ -580,6 +580,23 @@ class DependencyInstaller:
         """
         self.log("\n安装项目依赖...")
 
+        # 验证 Python 解释器路径
+        import os
+        if not os.path.exists(python_path):
+            self.log(f"错误: Python 解释器不存在，无法安装依赖")
+            self.log(f"  路径: {python_path}")
+            # 尝试提供诊断信息
+            parent_dir = os.path.dirname(python_path)
+            if os.path.exists(parent_dir):
+                try:
+                    contents = os.listdir(parent_dir)
+                    self.log(f"  父目录存在，内容: {contents}")
+                except Exception as e:
+                    self.log(f"  无法列出父目录内容: {e}")
+            else:
+                self.log(f"  父目录也不存在: {parent_dir}")
+            return
+
         if not dependencies:
             self.log("未发现需要安装的依赖包")
             return
@@ -642,6 +659,10 @@ class DependencyInstaller:
                 timeout=30,
                 creationflags=CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
+        except FileNotFoundError as e:
+            self.log(f"警告: 升级 pip 失败 - Python 解释器不存在")
+            self.log(f"  路径: {python_path}")
+            self.log(f"  错误: {str(e)}")
         except Exception:
             pass  # 升级失败不影响后续安装
 

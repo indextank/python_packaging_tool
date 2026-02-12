@@ -9,7 +9,7 @@ __version__ = "1.5.3"
 VERSION = __version__
 
 # 构建日期（用于显示，不参与Windows文件版本号）
-BUILD_DATE = "20260207"
+BUILD_DATE = "20260212"
 
 # 完整显示版本（用于UI显示）
 DISPLAY_VERSION = f"{__version__}.{BUILD_DATE}"

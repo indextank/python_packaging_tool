@@ -52,20 +52,39 @@ class VenvManager:
                     return venv_path
         return None
 
-    def get_venv_python(self, venv_path: str) -> str:
+    def get_venv_python(self, venv_path: str, verify: bool = False) -> str:
         """
         获取虚拟环境中的 Python 路径
 
         Args:
             venv_path: 虚拟环境路径
+            verify: 是否验证路径存在
 
         Returns:
             Python 可执行文件路径
         """
         if sys.platform == "win32":
-            return os.path.join(venv_path, "Scripts", "python.exe")
+            python_path = os.path.join(venv_path, "Scripts", "python.exe")
         else:
-            return os.path.join(venv_path, "bin", "python")
+            python_path = os.path.join(venv_path, "bin", "python")
+
+        if verify and not os.path.exists(python_path):
+            self.log(f"警告: Python 解释器不存在: {python_path}")
+            self.log(f"  虚拟环境路径: {venv_path}")
+            self.log(f"  虚拟环境目录是否存在: {os.path.exists(venv_path)}")
+            if os.path.exists(venv_path):
+                try:
+                    contents = os.listdir(venv_path)
+                    self.log(f"  虚拟环境目录内容: {contents}")
+                    if sys.platform == "win32":
+                        scripts_dir = os.path.join(venv_path, "Scripts")
+                        if os.path.exists(scripts_dir):
+                            scripts_contents = os.listdir(scripts_dir)
+                            self.log(f"  Scripts 目录内容: {scripts_contents}")
+                except Exception as e:
+                    self.log(f"  无法列出目录内容: {e}")
+
+        return python_path
 
     def setup_venv(
         self,
@@ -84,6 +103,44 @@ class VenvManager:
         Returns:
             虚拟环境路径，失败返回 None
         """
+        # 验证 python_path 是否存在
+        if not os.path.exists(python_path):
+            self.log(f"错误: Python 解释器不存在: {python_path}")
+            return None
+
+        # 验证 python_path 是否是可用的完整解释器（能执行 venv 模块）
+        try:
+            check_result = subprocess.run(
+                [python_path, "-c", "import venv; print('ok')"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            if check_result.returncode != 0:
+                self.log(f"错误: Python 解释器无法使用 venv 模块: {python_path}")
+                self.log(f"  错误信息: {check_result.stderr.strip()}")
+                # 检测是否是打包环境中的临时文件
+                import tempfile
+                temp_dir = os.path.normpath(tempfile.gettempdir())
+                if os.path.normpath(python_path).startswith(temp_dir):
+                    self.log("  原因: 该解释器位于临时目录中，可能是 PyInstaller 打包后的运行时文件")
+                    self.log("  建议: 请在工具界面中手动指定系统安装的 Python 路径")
+                return None
+        except FileNotFoundError:
+            self.log(f"错误: 无法执行 Python 解释器: {python_path}")
+            self.log("  该文件可能不是有效的 Python 解释器")
+            import tempfile
+            temp_dir = os.path.normpath(tempfile.gettempdir())
+            if os.path.normpath(python_path).startswith(temp_dir):
+                self.log("  原因: 该路径位于临时目录中，可能是 PyInstaller 单文件模式的运行时文件")
+                self.log("  建议: 请在工具界面中手动指定系统安装的 Python 路径")
+            return None
+        except subprocess.TimeoutExpired:
+            self.log(f"警告: 验证 Python 解释器超时: {python_path}")
+        except Exception as e:
+            self.log(f"警告: 验证 Python 解释器时出错: {e}")
+
         venv_path = os.path.join(project_dir, venv_name)
 
         # 如果已存在，直接返回
@@ -112,10 +169,15 @@ class VenvManager:
             # 验证虚拟环境是否创建成功
             venv_python = self.get_venv_python(venv_path)
             if not os.path.exists(venv_python):
-                self.log("虚拟环境创建后未找到 Python 解释器")
+                self.log("错误: 虚拟环境创建后未找到 Python 解释器")
+                self.log(f"  期望路径: {venv_python}")
+                self.log(f"  虚拟环境目录: {venv_path}")
+                # 详细诊断信息
+                self.get_venv_python(venv_path, verify=True)
                 return None
 
             self.log(f"✓ 虚拟环境创建成功: {venv_path}")
+            self.log(f"  Python 解释器: {venv_python}")
             return venv_path
 
         except subprocess.TimeoutExpired:
@@ -137,6 +199,15 @@ class VenvManager:
         """
         python_path = self.get_venv_python(venv_path)
 
+        # 验证 Python 解释器是否存在
+        if not os.path.exists(python_path):
+            self.log("错误: Python 解释器不存在，无法升级 pip")
+            self.log(f"  期望路径: {python_path}")
+            self.log(f"  虚拟环境路径: {venv_path}")
+            # 尝试列出虚拟环境目录内容以帮助诊断
+            self.get_venv_python(venv_path, verify=True)
+            return False
+
         try:
             self.log("升级 pip...")
             result = subprocess.run(
@@ -154,8 +225,14 @@ class VenvManager:
                 self.log(f"pip 升级失败: {result.stderr}")
                 return False
 
+        except FileNotFoundError as e:
+            self.log("错误: 找不到 Python 解释器文件")
+            self.log(f"  路径: {python_path}")
+            self.log(f"  详细错误: {str(e)}")
+            return False
         except Exception as e:
             self.log(f"升级 pip 时出错: {str(e)}")
+            self.log(f"  错误类型: {type(e).__name__}")
             return False
 
     def get_installed_packages(self, venv_path: str) -> dict:
@@ -209,21 +286,27 @@ class VenvManager:
         packages = self.get_installed_packages(venv_path)
         return package_name.lower() in packages
 
-    def validate_venv(self, venv_path: str) -> bool:
+    def validate_venv(self, venv_path: str, verbose: bool = False) -> bool:
         """
         验证虚拟环境是否有效
 
         Args:
             venv_path: 虚拟环境路径
+            verbose: 是否输出详细日志
 
         Returns:
             是否有效
         """
         if not os.path.isdir(venv_path):
+            if verbose:
+                self.log(f"虚拟环境目录不存在: {venv_path}")
             return False
 
         python_path = self.get_venv_python(venv_path)
         if not os.path.exists(python_path):
+            if verbose:
+                self.log(f"Python 解释器不存在: {python_path}")
+                self.get_venv_python(venv_path, verify=True)
             return False
 
         # 尝试运行 Python 验证
@@ -235,8 +318,17 @@ class VenvManager:
                 timeout=10,
                 creationflags=CREATE_NO_WINDOW,
             )
-            return result.returncode == 0
-        except Exception:
+            if result.returncode == 0:
+                if verbose:
+                    self.log(f"✓ 虚拟环境有效: {result.stdout.strip()}")
+                return True
+            else:
+                if verbose:
+                    self.log(f"虚拟环境 Python 执行失败: {result.stderr}")
+                return False
+        except Exception as e:
+            if verbose:
+                self.log(f"验证虚拟环境时出错: {str(e)}")
             return False
 
     def get_python_version(self, venv_path: str) -> Optional[str]:

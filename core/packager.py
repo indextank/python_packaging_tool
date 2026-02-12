@@ -92,14 +92,56 @@ class Packager:
         self.pyinstaller_packager.set_process_callback(callback)
         self.nuitka_packager.set_process_callback(callback)
 
-    def _get_python_path(self, config: Dict) -> Optional[str]:
-        """获取 Python 解释器路径（不处理虚拟环境，仅获取基础解释器）"""
-        # 优先使用配置指定的解释器
+    def _get_python_path(self, config: Dict) -> Tuple[Optional[str], str]:
+        """
+        获取 Python 解释器路径（不处理虚拟环境，仅获取基础解释器）
+
+        优先级：
+        1. 用户在配置中手动指定的路径（经过有效性校验）
+        2. 当前运行的解释器（仅在非打包环境下）
+        3. 通过 PythonFinder 在系统中搜索
+
+        Returns:
+            (python_path, error_message) 元组。
+            成功时 python_path 为有效路径、error_message 为空字符串；
+            失败时 python_path 为 None、error_message 为描述性错误信息。
+        """
+        # 1. 优先使用配置指定的解释器
         python_path = config.get("python_path") or config.get("python")
         if python_path and os.path.exists(python_path):
-            return python_path
-        # 否则使用当前运行的解释器
-        return sys.executable
+            # 即使用户手动指定，也要验证它不是打包环境中的临时文件
+            if PythonFinder.is_valid_python_interpreter(python_path):
+                return python_path, ""
+            else:
+                self.log(f"警告: 指定的 Python 路径不是有效的解释器: {python_path}")
+
+        # 2. 检测是否处于 PyInstaller/Nuitka 打包后的环境中
+        if PythonFinder.is_bundled_environment():
+            self.log(
+                "检测到当前运行在打包环境中，sys.executable 不可用于创建虚拟环境"
+            )
+            self.log(f"  sys.executable = {sys.executable}")
+            self.log("正在搜索系统中安装的 Python 解释器...")
+
+            finder = PythonFinder()
+            system_python = finder.find_python()
+            if system_python:
+                self.log(f"✓ 找到系统 Python: {system_python}")
+                return system_python, ""
+            else:
+                error_msg = (
+                    "未在系统中找到可用的 Python 解释器。\n\n"
+                    "请在工具界面的「Python路径」中手动指定系统安装的 Python 解释器路径\n"
+                    "（例如 C:\\Python311\\python.exe）。\n\n"
+                    "如果尚未安装 Python，请先从 https://www.python.org 下载安装，\n"
+                    "安装时请勾选「Add Python to PATH」。"
+                )
+                self.log("错误: 未在系统中找到可用的 Python 解释器")
+                self.log("请在工具界面中手动指定 Python 路径")
+                return None, error_msg
+
+        # 3. 非打包环境，使用当前解释器
+        return sys.executable, ""
 
     def _setup_venv_if_needed(
         self,
@@ -125,6 +167,10 @@ class Packager:
 
         if not use_venv:
             self.log("未启用虚拟环境，使用指定的 Python 解释器")
+            # 验证基础 Python 解释器是否存在
+            if not os.path.exists(base_python_path):
+                self.log(f"错误: 指定的 Python 解释器不存在: {base_python_path}")
+                raise FileNotFoundError(f"Python 解释器不存在: {base_python_path}")
             return base_python_path
 
         project_dir = config.get("project_dir")
@@ -140,15 +186,37 @@ class Packager:
         self.log("虚拟环境设置")
         self.log("=" * 50)
 
+        # 验证基础 Python 解释器路径
+        if not os.path.exists(base_python_path):
+            self.log(f"错误: 基础 Python 解释器不存在: {base_python_path}")
+            self.log("将无法创建虚拟环境，请检查 Python 安装")
+            raise FileNotFoundError(f"Python 解释器不存在: {base_python_path}")
+
+        self.log(f"基础 Python 解释器: {base_python_path}")
+
         # 1. 检查是否存在虚拟环境
         existing_venv = self.venv_manager.check_existing_venv(project_dir)
+        venv_python: Optional[str] = None
+        active_venv_path: Optional[str] = None
 
         if existing_venv:
             self.log(f"✓ 检测到现有虚拟环境: {existing_venv}")
             venv_python = self.venv_manager.get_venv_python(existing_venv)
-        else:
+            active_venv_path = existing_venv
+
+            # 验证现有虚拟环境的有效性
+            if not os.path.exists(venv_python):
+                self.log(f"警告: 现有虚拟环境的 Python 解释器不存在: {venv_python}")
+                self.log("尝试验证虚拟环境...")
+                if not self.venv_manager.validate_venv(existing_venv, verbose=True):
+                    self.log("现有虚拟环境无效，将创建新的虚拟环境")
+                    existing_venv = None
+                    venv_python = None
+                    active_venv_path = None
+
+        if not existing_venv:
             # 创建新的虚拟环境
-            self.log("未检测到虚拟环境，正在创建...")
+            self.log("未检测到有效的虚拟环境，正在创建...")
             venv_path = self.venv_manager.setup_venv(
                 project_dir,
                 base_python_path,
@@ -161,13 +229,28 @@ class Packager:
 
             self.log(f"✓ 虚拟环境创建成功: {venv_path}")
             venv_python = self.venv_manager.get_venv_python(venv_path)
+            active_venv_path = venv_path
+
+            # 再次验证虚拟环境是否真的可用
+            if not os.path.exists(venv_python):
+                self.log(f"错误: 虚拟环境创建后 Python 解释器仍不存在: {venv_python}")
+                self.log("虚拟环境创建失败，使用原始 Python 解释器")
+                return base_python_path
 
             # 升级 pip
-            self.venv_manager.upgrade_pip(venv_path)
+            if not self.venv_manager.upgrade_pip(venv_path):
+                self.log("警告: pip 升级失败，但将继续使用虚拟环境")
 
-        if not os.path.exists(venv_python):
-            self.log("警告: 虚拟环境 Python 不存在，使用原始解释器")
+        # 最终验证
+        if not venv_python or not os.path.exists(venv_python):
+            self.log(f"错误: 虚拟环境 Python 解释器不存在: {venv_python}")
+            self.log("详细诊断信息:")
+            if active_venv_path:
+                self.venv_manager.get_venv_python(active_venv_path, verify=True)
+            self.log("回退到使用原始 Python 解释器")
             return base_python_path
+
+        self.log(f"✓ 将使用虚拟环境 Python: {venv_python}")
 
         # 2. 安装依赖
         self._install_venv_dependencies(project_dir, venv_python, config)
@@ -784,9 +867,9 @@ VSVersionInfo(
                 return False, "打包已取消", None
 
             # 1. 获取基础 Python 路径
-            base_python_path = self._get_python_path(config)
+            base_python_path, python_error = self._get_python_path(config)
             if not base_python_path:
-                return False, "未找到 Python 环境", None
+                return False, python_error or "未找到 Python 环境", None
 
             self.log(f"基础 Python: {base_python_path}")
 

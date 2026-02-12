@@ -67,7 +67,7 @@ from utils.dependency_manager import DependencyManager
 from utils.gcc_downloader import GCCDownloader, validate_mingw_directory
 
 # 导入版本信息
-from version import APP_NAME, AUTHOR_EMAIL, get_about_html
+from version import APP_NAME, AUTHOR_EMAIL, DISPLAY_VERSION, get_about_html
 
 
 class MainWindow(QMainWindow):
@@ -396,8 +396,8 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(dialog)
 
-        # 软件信息
-        info_label = QLabel(f"<h3>{APP_NAME}</h3>")
+        # 软件信息（包含版本号）
+        info_label = QLabel(f"<h3>{APP_NAME}</h3><p><b>软件版本：</b>{DISPLAY_VERSION}</p>")
         layout.addWidget(info_label)
 
         # 获取当前配置信息
@@ -476,6 +476,7 @@ class MainWindow(QMainWindow):
         copy_btn = QPushButton("一键复制")
         def copy_all():
             full_text = f"""{APP_NAME} - 问题反馈
+软件版本：{DISPLAY_VERSION}
 
 当前打包配置：
 - 打包工具: {config.get('tool', 'N/A')}

@@ -176,6 +176,24 @@ class NetworkUtils:
         Returns:
             安装是否成功
         """
+        # 验证 Python 解释器是否存在
+        import os
+        if not os.path.exists(python_path):
+            self.log(f"错误: Python 解释器不存在，无法安装包")
+            self.log(f"  路径: {python_path}")
+            self.log(f"  包列表: {packages}")
+            # 尝试提供诊断信息
+            parent_dir = os.path.dirname(python_path)
+            if os.path.exists(parent_dir):
+                try:
+                    contents = os.listdir(parent_dir)
+                    self.log(f"  父目录内容: {contents}")
+                except Exception as e:
+                    self.log(f"  无法列出父目录内容: {e}")
+            else:
+                self.log(f"  父目录也不存在: {parent_dir}")
+            return False
+
         # 获取当前网络环境对应的镜像源列表
         pip_mirrors = self.get_pip_mirrors()
 
@@ -226,8 +244,17 @@ class NetworkUtils:
 
             except subprocess.TimeoutExpired:
                 self.log(f"  使用 {mirror_name} 超时")
+            except FileNotFoundError as e:
+                self.log(f"  使用 {mirror_name} 出错: [WinError 2] 系统找不到指定的文件。")
+                self.log(f"    Python 路径: {python_path}")
+                self.log(f"    命令: {' '.join(cmd[:5])}...")
+                self.log(f"    详细错误: {str(e)}")
+                # 这是致命错误，不应继续尝试其他镜像源
+                self.log(f"警告: 安装 {' '.join(packages)} 失败（已尝试所有镜像源）")
+                return False
             except Exception as e:
                 self.log(f"  使用 {mirror_name} 出错: {str(e)}")
+                self.log(f"    错误类型: {type(e).__name__}")
 
             # 切换到下一个镜像源
             self._current_mirror_index = (self._current_mirror_index + 1) % total_mirrors
@@ -237,6 +264,7 @@ class NetworkUtils:
                 next_mirror = pip_mirrors[self._current_mirror_index][0]
                 self.log(f"  切换到 {next_mirror}...")
 
+        self.log(f"警告: 安装 {' '.join(packages)} 失败（已尝试所有镜像源）")
         return False
 
     def _get_host_from_url(self, url: str) -> str:
