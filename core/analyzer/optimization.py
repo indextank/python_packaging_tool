@@ -13,6 +13,7 @@
 """
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Set, Tuple
 
@@ -92,8 +93,9 @@ class OptimizationAdvisor:
         for dep in dependencies:
             try:
                 # 使用pip show获取包信息
+                exe_path = python_path if python_path else sys.executable
                 result = subprocess.run(
-                    [python_path, "-m", "pip", "show", dep],
+                    [exe_path, "-m", "pip", "show", dep],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -310,8 +312,9 @@ print("__SUBMODULES_END__")
 '''
 
         try:
+            exe_path = python_path if python_path else sys.executable
             result = subprocess.run(
-                [python_path, "-c", collect_code],
+                [exe_path, "-c", collect_code],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -413,13 +416,13 @@ print("__SUBMODULES_END__")
             self.log(f"\n  收集 {display_name} 的子模块...")
             submodules = self.auto_collect_submodules(module_name, python_path)
 
+            # 无论是否为单文件模块，都存储结果，避免 fallthrough 到 common patterns
+            auto_collected_modules[module_name] = submodules
+            if original_dep != module_name:
+                auto_collected_modules[original_dep] = submodules
             if len(submodules) > 1:
                 self.log(f"    ✓ 收集到 {len(submodules)} 个子模块")
-                # 同时以模块名和原始依赖名存储，便于后续查找
-                auto_collected_modules[module_name] = submodules
-                if original_dep != module_name:
-                    auto_collected_modules[original_dep] = submodules
             else:
-                self.log("    使用基础模块")
+                self.log("    ✓ 单文件模块，仅包含基础模块")
 
         return auto_collected_modules

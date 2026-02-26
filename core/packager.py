@@ -471,6 +471,7 @@ class Packager:
         script_path: str,
         project_dir: Optional[str],
         python_path: str,
+        config: Dict,
     ) -> Tuple[set, List[str], List[str]]:
         """
         分析项目依赖
@@ -502,13 +503,26 @@ class Packager:
         # 自动收集未配置库的子模块
         self.dependency_analyzer.collect_all_unconfigured_submodules(python_path)
 
-        # 获取优化建议
+        # 获取优化建议并自动应用到配置
         exclude_modules, hidden_imports, _ = self.dependency_analyzer.get_optimization_suggestions(python_path)
 
-        self.log(f"建议隐藏导入: {len(hidden_imports)} 个")
-        self.log(f"建议排除模块: {len(exclude_modules)} 个")
+        # 自动合并到配置中的 hidden_imports / exclude_modules（去重保序）
+        config_hidden = config.get("hidden_imports", []) or []
+        config_exclude = config.get("exclude_modules", []) or []
 
-        return deps, hidden_imports, exclude_modules
+        merged_hidden = list(dict.fromkeys(config_hidden + hidden_imports))
+        merged_exclude = list(dict.fromkeys(config_exclude + exclude_modules))
+
+        config["hidden_imports"] = merged_hidden
+        config["exclude_modules"] = merged_exclude
+
+        applied_hidden_count = max(0, len(merged_hidden) - len(config_hidden))
+        applied_exclude_count = max(0, len(merged_exclude) - len(config_exclude))
+
+        self.log(f"已自动应用隐藏导入: +{applied_hidden_count} 个（当前共 {len(merged_hidden)} 个）")
+        self.log(f"已自动应用排除模块: +{applied_exclude_count} 个（当前共 {len(merged_exclude)} 个）")
+
+        return deps, merged_hidden, merged_exclude
 
     def _install_dependencies(
         self,
@@ -912,7 +926,7 @@ VSVersionInfo(
 
             # 6. 分析依赖
             deps, hidden_imports, exclude_modules = self._analyze_dependencies(
-                script_path, project_dir, python_path
+                script_path, project_dir, python_path, config
             )
 
             # 检查取消

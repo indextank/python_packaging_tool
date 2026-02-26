@@ -96,7 +96,7 @@ class NuitkaPackager(BasePackager):
 
         # 控制台模式
         if not config.get("console", False):
-            cmd.append("--disable-console")
+            cmd.append("--windows-console-mode=disable")
 
         # 图标
         if icon_path and os.path.exists(icon_path):
@@ -520,8 +520,110 @@ class NuitkaPackager(BasePackager):
                 except Exception as e:
                     self.log(f"⚠️ 清理构建缓存失败: {e}")
 
+        # 清理 Nuitka 全局编译缓存（clcache、ccache 等）
+        nuitka_options = config.get("nuitka_advanced_options", {}) if config else {}
+        if nuitka_options.get("clean_cache_after_build", False):
+            self._clean_nuitka_global_cache(nuitka_options.get("custom_cache_dir", ""))
+
         # 注意：不再此处清理 icon_converted.ico，保留给后处理使用
         # 由 packager.py 在完成所有操作后统一清理
+
+    @staticmethod
+    def _get_default_nuitka_cache_dir() -> str:
+        """
+        获取 Nuitka 默认全局缓存根目录
+
+        Returns:
+            缓存根目录路径，如 C:\\Users\\<用户名>\\AppData\\Local\\Nuitka\\Nuitka\\Cache
+        """
+        if sys.platform == "win32":
+            local_app_data = os.environ.get(
+                "LOCALAPPDATA",
+                os.path.join(os.path.expanduser("~"), "AppData", "Local"),
+            )
+            return os.path.join(local_app_data, "Nuitka", "Nuitka", "Cache")
+        else:
+            # Linux / macOS: ~/.cache/Nuitka
+            xdg_cache = os.environ.get(
+                "XDG_CACHE_HOME",
+                os.path.join(os.path.expanduser("~"), ".cache"),
+            )
+            return os.path.join(xdg_cache, "Nuitka")
+
+    def _clean_nuitka_global_cache(self, custom_cache_dir: str = "") -> None:
+        """
+        清理 Nuitka 全局编译缓存目录
+
+        清理的子目录包括：
+        - clcache   (Windows MSVC 编译缓存)
+        - ccache    (GCC/Clang 编译缓存)
+        - bytecode  (字节码缓存)
+        - dll_dependencies (DLL 依赖分析缓存)
+
+        不清理的子目录：
+        - downloads (已下载的工具链，如 MinGW GCC，清理后需重新下载)
+
+        Args:
+            custom_cache_dir: 用户自定义的缓存根目录，为空则使用默认位置
+        """
+        import shutil
+
+        # 确定缓存根目录
+        if custom_cache_dir and os.path.isdir(custom_cache_dir):
+            cache_root = custom_cache_dir
+        else:
+            cache_root = self._get_default_nuitka_cache_dir()
+
+        if not os.path.isdir(cache_root):
+            self.log(f"Nuitka 全局缓存目录不存在，跳过清理: {cache_root}")
+            return
+
+        self.log(f"\n开始清理 Nuitka 全局编译缓存: {cache_root}")
+
+        # 需要清理的编译缓存子目录
+        # 注意：保留 downloads 目录，该目录包含已下载的工具链（如 MinGW GCC），
+        # 清理后需要重新下载，耗时且浪费带宽
+        cache_subdirs = [
+            "clcache",
+            "ccache",
+            "bytecode",
+            "dll_dependencies",
+        ]
+
+        total_cleaned_size = 0
+
+        for subdir_name in cache_subdirs:
+            subdir_path = os.path.join(cache_root, subdir_name)
+            if not os.path.isdir(subdir_path):
+                continue
+
+            # 计算目录大小
+            dir_size = 0
+            try:
+                for dirpath, _dirnames, filenames in os.walk(subdir_path):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        try:
+                            dir_size += os.path.getsize(fp)
+                        except OSError:
+                            pass
+            except Exception:
+                pass
+
+            # 执行清理
+            try:
+                shutil.rmtree(subdir_path)
+                size_mb = dir_size / (1024 * 1024)
+                total_cleaned_size += dir_size
+                self.log(f"  ✓ 已清理 {subdir_name} ({size_mb:.1f} MB)")
+            except Exception as e:
+                self.log(f"  ⚠️ 清理 {subdir_name} 失败: {e}")
+
+        if total_cleaned_size > 0:
+            total_mb = total_cleaned_size / (1024 * 1024)
+            self.log(f"  共释放空间: {total_mb:.1f} MB")
+        else:
+            self.log("  未发现需要清理的编译缓存")
 
     def extract_gcc(
         self,

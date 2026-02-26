@@ -5,11 +5,11 @@ Python打包工具 - 版本信息
 """
 
 # 版本号
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 VERSION = __version__
 
 # 构建日期（用于显示，不参与Windows文件版本号）
-BUILD_DATE = "20260212"
+BUILD_DATE = "20260226"
 
 # 完整显示版本（用于UI显示）
 DISPLAY_VERSION = f"{__version__}.{BUILD_DATE}"

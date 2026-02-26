@@ -1813,6 +1813,18 @@ class HiddenImportsManager:
                 "paramiko.sftp_client",
             ])
 
+        # sshtunnel 相关（单文件模块，依赖 paramiko）
+        if "sshtunnel" in dependencies:
+            hidden.extend([
+                "sshtunnel",
+                "paramiko",
+                "paramiko.client",
+                "paramiko.transport",
+                "paramiko.channel",
+                "paramiko.sftp",
+                "paramiko.sftp_client",
+            ])
+
         return hidden
 
     def _get_utility_hidden_imports(self, dependencies: Set[str]) -> List[str]:

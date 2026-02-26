@@ -488,7 +488,7 @@ class DependencyAnalyzer:
         """获取建议排除的模块列表"""
         return self._optimization_advisor.get_exclude_modules(self.dependencies)
 
-    def get_hidden_imports(self) -> List[str]:
+    def get_hidden_imports(self, python_path: Optional[str] = None) -> List[str]:
         """获取可能需要的隐藏导入"""
         # 同步状态到隐藏导入管理器
         self._hidden_imports_manager.set_dynamic_imports(self._dynamic_imports)
@@ -496,10 +496,13 @@ class DependencyAnalyzer:
             self._auto_collected_modules
         )
 
+        def is_real_package_wrapper(module_name: str) -> bool:
+            return self.is_real_package(module_name, python_path)
+
         return self._hidden_imports_manager.get_hidden_imports(
             self.dependencies,
             self.primary_qt_framework,
-            is_real_package_func=self.is_real_package,
+            is_real_package_func=is_real_package_wrapper,
             is_stdlib_func=self._is_stdlib,
         )
 
@@ -572,14 +575,14 @@ class DependencyAnalyzer:
     ) -> Tuple[List[str], List[str], Dict[str, Dict[str, float]]]:
         """获取打包优化建议"""
         exclude_modules = self.get_exclude_modules()
-        hidden_imports = self.get_hidden_imports()
+        hidden_imports = self.get_hidden_imports(python_path)
         size_info = self.get_package_size_info(python_path)
 
         return exclude_modules, hidden_imports, size_info
 
     def generate_optimization_report(self, python_path: str) -> str:
         """生成优化报告"""
-        hidden_imports = self.get_hidden_imports()
+        hidden_imports = self.get_hidden_imports(python_path)
         return self._optimization_advisor.generate_optimization_report(
             self.dependencies, hidden_imports, python_path
         )

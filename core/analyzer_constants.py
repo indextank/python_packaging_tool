@@ -366,7 +366,8 @@ CONFIGURED_LIBRARIES: Set[str] = {
     "python-barcode", "watchdog", "dotenv", "python-dotenv", "pydantic",
     "marshmallow", "tenacity", "retrying", "faker", "Faker", "attrs", "attr",
     # 网络
-    "websocket", "websocket-client", "paramiko", "httptools", "uvloop",
+    "websocket", "websocket-client", "paramiko", "sshtunnel",
+    "httptools", "uvloop",
     "gunicorn", "urllib3", "dns", "dnspython", "httplib2", "aiohttp",
     "certifi", "chardet", "charset_normalizer", "idna",
     # 图像

@@ -302,6 +302,7 @@ class NuitkaOptionsDialog(QDialog):
 
             # 缓存配置
             "custom_cache_dir": "",           # 自定义缓存目录
+            "clean_cache_after_build": True,  # 打包完成后清理编译缓存
 
             # 显示选项
             "show_progress": True,            # 显示进度
@@ -634,15 +635,30 @@ class NuitkaOptionsDialog(QDialog):
 
         # 缓存配置
         cache_group = QGroupBox("缓存配置")
-        cache_layout = QFormLayout(cache_group)
+        cache_layout = QVBoxLayout(cache_group)
 
+        cache_form = QFormLayout()
         self.custom_cache_edit = QLineEdit()
         self.custom_cache_edit.setPlaceholderText("留空使用默认缓存目录")
         self.custom_cache_edit.setToolTip(
             "自定义 Nuitka 缓存目录。\n"
             "对于 CI/CD 环境，可以指定持久化目录加速构建。"
         )
-        cache_layout.addRow("缓存目录:", self.custom_cache_edit)
+        cache_form.addRow("缓存目录:", self.custom_cache_edit)
+        cache_layout.addLayout(cache_form)
+
+        self.clean_cache_after_build_check = QCheckBox("打包完成后清理编译缓存（推荐）")
+        self.clean_cache_after_build_check.setToolTip(
+            "打包成功后自动清理 Nuitka 的全局编译缓存目录，\n"
+            "包括 clcache、ccache、bytecode、dll_dependencies 等。\n\n"
+            "这些缓存默认存储在系统盘：\n"
+            "  C:\\Users\\<用户名>\\AppData\\Local\\Nuitka\\Nuitka\\Cache\n\n"
+            "长期多次打包会导致缓存持续增长占满 C 盘，\n"
+            "启用此选项可在每次打包完成后自动释放空间。\n\n"
+            "注意：清理缓存后下次打包会稍慢（需重新编译），\n"
+            "但可以避免 C 盘空间不足的问题。"
+        )
+        cache_layout.addWidget(self.clean_cache_after_build_check)
 
         layout.addWidget(cache_group)
 
@@ -737,6 +753,9 @@ class NuitkaOptionsDialog(QDialog):
 
         # 缓存配置
         self.custom_cache_edit.setText(self.options.get("custom_cache_dir", ""))
+        self.clean_cache_after_build_check.setChecked(
+            self.options.get("clean_cache_after_build", True)
+        )
 
         # 用户包配置
         self.user_package_config_edit.setText(self.options.get("user_package_config", ""))
@@ -783,6 +802,7 @@ class NuitkaOptionsDialog(QDialog):
 
         # 缓存配置
         self.options["custom_cache_dir"] = self.custom_cache_edit.text().strip()
+        self.options["clean_cache_after_build"] = self.clean_cache_after_build_check.isChecked()
 
         # 用户包配置
         self.options["user_package_config"] = self.user_package_config_edit.text().strip()

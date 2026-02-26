@@ -43,7 +43,7 @@ def _check_pil_available() -> bool:
 def _check_cairosvg_available() -> bool:
     """动态检查 cairosvg 是否可在当前进程中导入"""
     try:
-        import cairosvg  # noqa: F401
+        import cairosvg  # noqa: F401  # type: ignore[import-not-found]  # pyright: ignore[reportUnusedImport]
         return True
     except Exception:
         return False
@@ -148,7 +148,7 @@ class IconProcessor:
         # 如果是 Nuitka onefile 环境，尝试在解压目录中查找
         if hasattr(sys, '_MEIPASS'):
             possible_locations.append(
-                os.path.join(sys._MEIPASS, "core", "packaging", "icon_convert_helper.py")
+                os.path.join(sys._MEIPASS, "core", "packaging", "icon_convert_helper.py")  # type: ignore[attr-defined]
             )
 
         # 尝试在 sys.path 中查找
@@ -543,7 +543,7 @@ if __name__ == "__main__":
             try:
                 return json.loads(stdout)
             except json.JSONDecodeError:
-                self.log(f"  ✗ 无法解析辅助脚本输出")
+                self.log("  ✗ 无法解析辅助脚本输出")
                 return None
 
         except subprocess.TimeoutExpired:
@@ -619,7 +619,7 @@ if __name__ == "__main__":
 
         # 检查目标 Python 中是否已有 Pillow
         if self._check_pillow_via_subprocess(python_path):
-            self.log("✓ 目标 Python 环境中已安装 Pillow（将通过子进程使用）")
+            # self.log("✓ 目标 Python 环境中已安装 Pillow（将通过子进程使用）")
             return True
 
         # 目标 Python 中也没有，尝试安装

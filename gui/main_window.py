@@ -29,7 +29,7 @@ from PyQt6.QtCore import (
     pyqtSignal,
     pyqtSlot,
 )
-from PyQt6.QtGui import QAction, QFont, QIcon
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -142,6 +142,9 @@ class MainWindow(QMainWindow):
 
     def _init_state(self) -> None:
         """初始化应用程序状态"""
+        # 日志最大化状态
+        self._log_maximized = False
+
         # GCC配置状态
         self.gcc_config_loaded = False
         self.gcc_config_loading = False
@@ -598,7 +601,7 @@ class MainWindow(QMainWindow):
 
     def _create_file_selection_group(self, parent_layout: QVBoxLayout) -> None:
         """创建文件选择组"""
-        file_group = QGroupBox("文件选择")
+        self.file_group = file_group = QGroupBox("文件选择")
         file_layout = QVBoxLayout(file_group)
 
         # Project directory
@@ -675,7 +678,7 @@ class MainWindow(QMainWindow):
 
     def _create_tool_selection_group(self, parent_layout: QVBoxLayout) -> None:
         """创建工具选择组"""
-        tool_group = QGroupBox("打包工具")
+        self.tool_group = tool_group = QGroupBox("打包工具")
         tool_layout = QVBoxLayout(tool_group)
 
         tool_radio_layout = QHBoxLayout()
@@ -730,7 +733,7 @@ class MainWindow(QMainWindow):
 
     def _create_options_group(self, parent_layout: QVBoxLayout) -> None:
         """Create packaging options group"""
-        options_group = QGroupBox("打包选项")
+        self.options_group = options_group = QGroupBox("打包选项")
         options_layout = QVBoxLayout(options_group)
 
         # 复选框行
@@ -799,8 +802,24 @@ class MainWindow(QMainWindow):
 
     def _create_log_group(self, parent_layout: QVBoxLayout) -> None:
         """创建日志输出组"""
-        log_group = QGroupBox("日志输出")
+        self.log_group = log_group = QGroupBox("日志输出")
         log_layout = QVBoxLayout(log_group)
+
+        # 日志区域顶部工具栏（放置最大化按钮）
+        log_toolbar = QHBoxLayout()
+        log_toolbar.setContentsMargins(0, 0, 0, 0)
+        log_toolbar.addStretch()
+
+        self.log_maximize_btn = QPushButton()
+        self.log_maximize_btn.setFixedSize(22, 22)
+        self.log_maximize_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.log_maximize_btn.setToolTip("最大化日志")
+        self.log_maximize_btn.clicked.connect(self._toggle_log_maximize)
+        self._update_log_maximize_btn_icon()
+        log_toolbar.addWidget(self.log_maximize_btn)
+
+        log_layout.addLayout(log_toolbar)
+
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setFont(QFont("Consolas", 9))
@@ -810,7 +829,9 @@ class MainWindow(QMainWindow):
 
     def _create_button_bar(self, parent_layout: QVBoxLayout) -> None:
         """Create bottom button bar"""
-        btn_layout = QHBoxLayout()
+        self.btn_bar_widget = QWidget()
+        btn_layout = QHBoxLayout(self.btn_bar_widget)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
 
         # 问题反馈文字链接（左侧）
         colors = self.theme_manager.colors
@@ -840,7 +861,7 @@ class MainWindow(QMainWindow):
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.package_btn)
 
-        parent_layout.addLayout(btn_layout)
+        parent_layout.addWidget(self.btn_bar_widget)
 
     def _on_version_info_check_clicked(self, checked: bool) -> None:
         """版权信息复选框被点击时触发（使用 clicked 信号更可靠）"""
@@ -1384,6 +1405,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'feedback_label'):
             colors = self.theme_manager.colors
             self.feedback_label.setText(f'<a href="#" style="text-decoration: none; color: {colors.text_primary};">问题反馈</a>')
+
+        # 更新日志最大化按钮图标（跟随主题颜色）
+        if hasattr(self, 'log_maximize_btn'):
+            self._update_log_maximize_btn_icon()
 
     def _update_theme_button_state(self) -> None:
         """更新主题菜单状态以反映当前设置"""
@@ -1998,6 +2023,116 @@ class MainWindow(QMainWindow):
     def clear_log(self) -> None:
         """Clear log output"""
         self.log_text.clear()
+
+    # =========================================================================
+    # Log Maximize / Restore
+    # =========================================================================
+
+    def _toggle_log_maximize(self) -> None:
+        """切换日志输出区域的最大化/还原状态"""
+        self._log_maximized = not self._log_maximized
+
+        # 需要隐藏/显示的组件列表
+        toggle_widgets = [
+            self.file_group,
+            self.tool_group,
+            self.options_group,
+            self.btn_bar_widget,
+        ]
+
+        if self._log_maximized:
+            # 最大化：隐藏其他区域
+            for widget in toggle_widgets:
+                widget.setVisible(False)
+            self.log_maximize_btn.setToolTip("还原日志")
+        else:
+            # 还原：显示其他区域
+            for widget in toggle_widgets:
+                widget.setVisible(True)
+            self.log_maximize_btn.setToolTip("最大化日志")
+
+        self._update_log_maximize_btn_icon()
+
+    def _update_log_maximize_btn_icon(self) -> None:
+        """根据当前主题和最大化状态更新按钮图标"""
+        colors = self.theme_manager.colors
+        fg = colors.text_secondary
+
+        if self._log_maximized:
+            icon = self._create_restore_icon(fg)
+        else:
+            icon = self._create_maximize_icon(fg)
+
+        self.log_maximize_btn.setIcon(icon)
+        self.log_maximize_btn.setStyleSheet(
+            "QPushButton {"
+            "  border: none;"
+            "  background: transparent;"
+            "  padding: 0px;"
+            "}"
+            "QPushButton:hover {"
+            f"  background: {colors.background_tertiary};"
+            "  border-radius: 3px;"
+            "}"
+        )
+
+    @staticmethod
+    def _create_maximize_icon(color: str, size: int = 16) -> QIcon:
+        """
+        绘制最大化图标（单个矩形 □）
+
+        Args:
+            color: 图标颜色
+            size: 图标尺寸
+
+        Returns:
+            QIcon 对象
+        """
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        pen = QPen(QColor(color), 1.5)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
+
+        m = 2  # margin
+        painter.drawRect(m, m, size - 2 * m - 1, size - 2 * m - 1)
+
+        painter.end()
+        return QIcon(pixmap)
+
+    @staticmethod
+    def _create_restore_icon(color: str, size: int = 16) -> QIcon:
+        """
+        绘制还原图标（两个重叠矩形 ⧉）
+
+        Args:
+            color: 图标颜色
+            size: 图标尺寸
+
+        Returns:
+            QIcon 对象
+        """
+        pixmap = QPixmap(size, size)
+        pixmap.fill(QColor(0, 0, 0, 0))
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        pen = QPen(QColor(color), 1.3)
+        painter.setPen(pen)
+        painter.setBrush(QBrush(QColor(0, 0, 0, 0)))
+
+        # 后方矩形（右上偏移）
+        painter.drawRect(5, 1, size - 7, size - 7)
+        # 前方矩形（左下偏移）
+        painter.drawRect(1, 5, size - 7, size - 7)
+
+        painter.end()
+        return QIcon(pixmap)
 
     # =========================================================================
     # Configuration

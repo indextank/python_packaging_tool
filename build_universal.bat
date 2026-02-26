@@ -998,13 +998,16 @@ echo ============================================
 if exist "%DIST_DIR%\%OUTPUT_EXE_NAME%.exe" (
     for %%i in ("%DIST_DIR%\%OUTPUT_EXE_NAME%.exe") do (
         set /a "SIZE_MB=%%~zi / 1048576"
-        echo File name: %OUTPUT_EXE_NAME%.exe
-        echo File size: %%~zi bytes (about !SIZE_MB! MB)
-        echo Build time: %%~ti
-        echo File location: %%~fi
+        set "FILE_SIZE_BYTES=%%~zi"
+        set "FILE_TIME=%%~ti"
+        set "FILE_FULL_PATH=%%~fi"
     )
+    echo File name: %OUTPUT_EXE_NAME%.exe
+    echo File size: !FILE_SIZE_BYTES! bytes ^(about !SIZE_MB! MB^)
+    echo Build time: !FILE_TIME!
+    echo File location: !FILE_FULL_PATH!
     echo.
-    echo [SUCCESS] Nuitka compilation completed successfully!
+    echo [SUCCESS] Nuitka compilation completed successfully^^!
 ) else (
     echo [ERROR] Executable file not found
 )

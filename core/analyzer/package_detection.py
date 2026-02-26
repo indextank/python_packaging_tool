@@ -97,7 +97,7 @@ class PackageDetector:
         if module_name in self._module_type_cache:
             return self._module_type_cache[module_name]
 
-        if python_path is None:
+        if not python_path:
             python_path = sys.executable
 
         # 快速检查：已知的单文件模块
